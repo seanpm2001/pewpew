@@ -68,6 +68,7 @@ Encode a string with the given encoding.
 - `"percent"` - Percent encodes every ASCII character less than hexidecimal 20 and greater than 7E in addition to ` `, `"`, `#`, `>`, `<`, `` ` ``, `?`, `{` and `}` (space, doublequote, hash, greater than, less than, backtick, question mark, open curly brace and close curly brace).
 - `"percent-path"` - Percent encodes every ASCII character less than hexidecimal 20 and greater than 7E in addition to ` `, `"`, `#`, `>`, `<`, `` ` ``, `?`, `{`, `}`, `%` and `/` (space, doublequote, hash, greater than, less than, backtick, question mark, open curly brace, close curly brace, percent and forward slash).
 - `"percent-userinfo"` - Percent encodes every ASCII character less than hexidecimal 20 and greater than 7E in addition to ` `, `"`, `#`, `>`, `<`, `` ` ``, `?`, `{`, `}`, `/`, `:`, `;`, `=`, `@`, `\`, `[`, `]`, `^`, and `|` (space, doublequote, hash, greater than, less than, backtick, question mark, open curly brace, close curly brace, forward slash, colon, semi-colon, equal sign, at sign, backslash, open square bracket, close square bracket, caret and pipe).<br/><br/>
+- `"non-alphanumeric"` - Non-Alphanumeric encodes every ASCII character that is not an ASCII letter or digit.
 
 **Example**: with the value `foo=bar` from a provider named `baz`, then the template `https://localhost/abc?${encode(baz, "percent-userinfo"}` would resolve to `https://localhost/abc?foo%3Dbar`.
 
@@ -348,6 +349,30 @@ Replaces any instance of a string (*needle*) within a JSON value (*haystack*) wi
 *replacer* - an expression whose value will be coerced to a string if needed.<br/>
 
 **Example**: with the value `{"foo": "baz", "zed": ["abc", 123, "fooo"]}` from a provider named `a`, then the expression `replace("foo", a, "bar")` would resolve to `{"bar": "baz", "zed": ["abc", 123, "baro"]}`.
+
+</td>
+</tr>
+<tr>
+<td>
+<code>parseInt(<i>value</i>)</code>
+</td>
+<td>
+
+Converts a string or other value into an integer (`i64`). If the value cannot be converted to a number, then `null` will be returned.
+
+*value* - any expression. The result of the expression will be coerced to a string if needed and then converted.
+
+</td>
+</tr>
+<tr>
+<td>
+<code>parseFloat(<i>value</i>)</code>
+</td>
+<td>
+
+Converts a string or other value into an floating point number (`f64`). If the value cannot be converted to a number, then `null` will be returned.
+
+*value* - any expression. The result of the expression will be coerced to a string if needed and then converted.
 
 </td>
 </tr>

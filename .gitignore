@@ -1,3 +1,4 @@
+.idea
 .vscode
 /target
 **/*.rs.bk
@@ -7,3 +8,4 @@
 /*.dump
 /*.log
 /*.json
+node_modules

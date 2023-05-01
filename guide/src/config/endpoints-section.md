@@ -29,7 +29,7 @@ The `endpoints` section declares what HTTP endpoints will be called during a tes
 
   \* While `peak_load` is marked as *optional* that is only true if the current endpoint has a *provides_subsection*, and in that case this endpoint is called only as frequently as needed to keep the buffers of the providers it feeds full.
 
-  A valid `load_pattern` is an unsigned integer followed by an optional space and the string "hpm" (meaning "hits per minute") or "hps" (meaning "hits per second").
+  A valid `load_pattern` is a number--integer or decimal--followed by an optional space and the string "hpm" (meaning "hits per minute") or "hps" (meaning "hits per second").
 
   Examples:
 
@@ -39,7 +39,7 @@ The `endpoints` section declares what HTTP endpoints will be called during a tes
 
 - **`tags`** <sub><sup>*Optional*</sup></sub> - Key/value string/[template](./common-types.md#templates) pairs.
 
-  Tags are a series of key/value pairs used to distinguish each endpoint. Tags can be used to include certain endpoints in a [`try` run](../cli.md#Command-line-options), and also make it possible for a single endpoint to have its results statistics aggregated in multiple groups. Because tag values are [templates](./common-types.md#templates) only tags which can be resolved statically at the beginning of a test can be used with the `include` flag of a `try` run. A reference to a provider can cause a single endpoint to have multiple groups of tags. Each one of these groups will have its own statistics in the results. For example if an endpoint had the following tags:
+  Tags are a series of key/value pairs used to distinguish each endpoint. Tags can be used to include certain endpoints in a [`try`](../cli.md#Command-line-options) run, and also make it possible for a single endpoint to have its results statistics aggregated in multiple groups. Because tag values are [templates](./common-types.md#templates) only tags which can be resolved statically at the beginning of a test can be used with the `include` flag of a `try` run. A reference to a provider can cause a single endpoint to have multiple groups of tags. Each one of these groups will have its own statistics in the results. For example if an endpoint had the following tags:
 
   ```
     tags:
@@ -48,7 +48,7 @@ The `endpoints` section declares what HTTP endpoints will be called during a tes
   ```
 
   A new group of aggregated stats will be created for every status code returned by the endpoint.
-  
+
   All endpoints have the following implicitly defined tags:
 
   | Name | Description |
@@ -102,7 +102,7 @@ To send a multipart body, the body parameter should be an object with a single k
 When a multipart body is used for an endpoint each request will have the `content-type` header added with the value `multipart/form-data` and the necessary boundary. If there is already a `content-type` header set for the request it will be overwritten unless it is starts with `multipart/`--then the necessary boundary will be appended. If a `multipart/...` `content-type` is manually set with the request, make sure to not include a `boundary` parameter.
 
 For any request which has a `content-type` of `multipart/form-data`, a `Content-Disposition` header will be added to each piece in the multipart body with a value of <code>form-data; name="<i>field_name</i>"</code> (where *field_name* is substituted with the piece's *field_name*). If a `Content-Disposition` header is explicitly specified for a piece it will not be overwritten.
-  
+
 File example:
 
 ```
@@ -192,9 +192,9 @@ The request object has the properties `start-line`, `method`, `url`, `headers`, 
 - **`send`** <sub><sup>*Optional*</sup></sub> - Specify the behavior that should be used when sending data to a provider. Valid options for this parameter are `block`, `force`, and `if_not_full`. Defaults to `if_not_full` if the endpoint has a `peak_load` otherwise `block`.
 
   `block` indicates that if the provider's buffer is full, further endpoint calls will be blocked until there's room in the provider's buffer for the value. If an endpoint has multiple provides which are `block`, then the blocking will only wait for at least one of the providers' buffers to have room.
-  
+
   `force` indicates that the value will be sent to the provider regardless of whether its buffer is "full". This can make a provider's buffer exceed its soft limit.
-  
+
   `if_not_full` indicates that the value will be sent to the provider only if the provider is not full.
 
 ### Example 1

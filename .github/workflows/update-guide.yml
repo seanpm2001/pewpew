@@ -9,7 +9,7 @@ jobs:
     name: Update guide
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
       - name: Add Rust toolchain
         uses: actions-rs/toolchain@v1
         with:
@@ -18,38 +18,34 @@ jobs:
           toolchain: stable
           override: true
       - name: Add Node.js toolchain
-        uses: actions/setup-node@v1
+        uses: actions/setup-node@v3
         with:
-          node-version: 12.x
+          node-version: 16.x
 
       - name: Build Results Viewer and Book
         run: |
+          set -x
           # install mdbook and wasm-pack
           mkdir ~/bin
           PATH=$PATH:~/bin
-          curl -sSL https://github.com/rust-lang/mdBook/releases/download/v0.4.0/mdbook-v0.4.0-x86_64-unknown-linux-gnu.tar.gz \
+          curl -sSL https://github.com/rust-lang/mdBook/releases/download/v0.4.20/mdbook-v0.4.20-x86_64-unknown-linux-gnu.tar.gz \
             | tar -xz -C ~/bin
-
-          curl -sSL https://github.com/rustwasm/wasm-pack/releases/download/v0.9.1/wasm-pack-v0.9.1-x86_64-unknown-linux-musl.tar.gz \
+          curl -sSL https://github.com/rustwasm/wasm-pack/releases/download/v0.11.0/wasm-pack-v0.11.0-x86_64-unknown-linux-musl.tar.gz \
             | tar -xz --strip-components=1 -C ~/bin --no-anchored wasm-pack
 
           # setup some envs to various paths for convenience
           PROJECT_ROOT=$PWD
           GUIDE_DIR=$(realpath $PROJECT_ROOT/guide)
-          RESULTS_VIEWER_DIR=$(realpath $GUIDE_DIR/results-viewer)
+          RESULTS_VIEWER_REACT_DIR=$(realpath $GUIDE_DIR/results-viewer-react)
           WASM_LIB_DIR=$(realpath $PROJECT_ROOT/lib/hdr-histogram-wasm)
-          WASM_OUTPUT_DIR=$RESULTS_VIEWER_DIR/lib/hdr-histogram-wasm
+          WASM_OUTPUT_REACT_DIR=$RESULTS_VIEWER_REACT_DIR/lib/hdr-histogram-wasm
 
           # build the hdr-histogram-wasm for the results viewer
           cd $WASM_LIB_DIR
-          wasm-pack build --release -t web -d $WASM_OUTPUT_DIR
-          cd $WASM_OUTPUT_DIR
-          sed 's/input = import\.meta\.url.*/import(".\/hdr_histogram_wasm_bg.wasm");\ninput = require.resolve(".\/hdr_histogram_wasm_bg.wasm")[0][0];/' hdr_histogram_wasm.js > hdr_histogram_wasm2.js
-          mv hdr_histogram_wasm2.js hdr_histogram_wasm.js
+          wasm-pack build --release -t bundler -d $WASM_OUTPUT_REACT_DIR --scope fs
 
-          # build the results viewer (which includes putting the output into the book's src)
-          cd $RESULTS_VIEWER_DIR
-          npm install
+          cd $RESULTS_VIEWER_REACT_DIR
+          npm ci
           npm run build
 
           # build the book

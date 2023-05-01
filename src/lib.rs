@@ -1,4 +1,5 @@
 #![warn(rust_2018_idioms)]
+#![allow(unused_attributes)]
 #![type_length_limit = "19550232"]
 #![allow(clippy::type_complexity)]
 
@@ -28,10 +29,13 @@ use hyper::{client::HttpConnector, Body, Client};
 use hyper_tls::HttpsConnector;
 use itertools::Itertools;
 use line_writer::{blocking_writer, MsgType};
+use log::{debug, error, info, warn};
 use mod_interval::{ModInterval, PerX};
 use native_tls::TlsConnector;
+use serde::Serialize;
 use serde_json as json;
 use tokio::{sync::broadcast, task::spawn_blocking};
+use tokio_stream::wrappers::{BroadcastStream, IntervalStream};
 use yansi::Paint;
 
 use std::{
@@ -39,20 +43,25 @@ use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
     convert::TryFrom,
+    fmt,
     fs::File,
     future::Future,
-    io::{Error as IOError, ErrorKind as IOErrorKind, Read, Seek, SeekFrom, Write},
+    io::{Error as IOError, ErrorKind as IOErrorKind, Read, Seek, Write},
     mem,
-    path::PathBuf,
+    path::{Path, PathBuf},
     pin::Pin,
-    sync::{atomic::Ordering, Arc},
+    sync::Arc,
     task::Poll,
     time::{Duration, Instant},
 };
 
 struct Endpoints {
     // yaml index of the endpoint, (endpoint tags, builder)
-    inner: Vec<(BTreeMap<String, String>, request::Builder, BTreeSet<String>)>,
+    inner: Vec<(
+        BTreeMap<String, String>,
+        request::EndpointBuilder,
+        BTreeSet<String>,
+    )>,
     // provider name, yaml index of endpoints which provide the provider
     providers: BTreeMap<String, Vec<usize>>,
 }
@@ -68,7 +77,7 @@ impl Endpoints {
     fn append(
         &mut self,
         endpoint_tags: BTreeMap<String, String>,
-        builder: request::Builder,
+        builder: request::EndpointBuilder,
         provides: BTreeSet<String>,
         required_providers: config::RequiredProviders,
     ) {
@@ -80,6 +89,7 @@ impl Endpoints {
         }
     }
 
+    #[allow(clippy::unnecessary_wraps)]
     fn build<F>(
         self,
         filter_fn: F,
@@ -142,7 +152,7 @@ impl Endpoints {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Serialize)]
 pub enum RunOutputFormat {
     Human,
     Json,
@@ -150,10 +160,7 @@ pub enum RunOutputFormat {
 
 impl RunOutputFormat {
     pub fn is_human(self) -> bool {
-        match self {
-            RunOutputFormat::Human => true,
-            _ => false,
-        }
+        matches!(self, RunOutputFormat::Human)
     }
 }
 
@@ -169,22 +176,23 @@ impl TryFrom<&str> for RunOutputFormat {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub enum StatsFileFormat {
     // Html,
     Json,
     // None,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub enum TryRunFormat {
+    #[default]
     Human,
     Json,
 }
 
-impl Default for TryRunFormat {
-    fn default() -> Self {
-        TryRunFormat::Human
+impl TryRunFormat {
+    pub fn is_human(self) -> bool {
+        matches!(self, TryRunFormat::Human)
     }
 }
 
@@ -200,36 +208,55 @@ impl TryFrom<&str> for TryRunFormat {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct RunConfig {
     pub config_file: PathBuf,
     pub output_format: RunOutputFormat,
     pub results_dir: Option<PathBuf>,
+    pub start_at: Option<Duration>,
     pub stats_file: PathBuf,
     pub stats_file_format: StatsFileFormat,
     pub watch_config_file: bool,
-    pub start_at: Option<Duration>,
 }
 
-#[derive(Clone)]
+impl fmt::Display for RunConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", serde_json::to_string(&self).unwrap_or_default())
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub enum TryFilter {
     Eq(String, String),
     Ne(String, String),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Serialize)]
 pub struct TryConfig {
     pub config_file: PathBuf,
-    pub loggers_on: bool,
     pub file: Option<String>,
     pub filters: Option<Vec<TryFilter>>,
     pub format: TryRunFormat,
+    pub loggers_on: bool,
     pub results_dir: Option<PathBuf>,
 }
 
+impl fmt::Display for TryConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", serde_json::to_string(&self).unwrap_or_default())
+    }
+}
+
+#[derive(Serialize)]
 pub enum ExecConfig {
     Run(RunConfig),
     Try(TryConfig),
+}
+
+impl fmt::Display for ExecConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", serde_json::to_string(&self).unwrap_or_default())
+    }
 }
 
 impl ExecConfig {
@@ -263,27 +290,45 @@ async fn _create_run(
     stdout: FCSender<MsgType>,
     stderr: FCSender<MsgType>,
     test_ended_tx: broadcast::Sender<Result<TestEndReason, TestError>>,
-    mut test_ended_rx: broadcast::Receiver<Result<TestEndReason, TestError>>,
+    mut test_ended_rx: BroadcastStream<Result<TestEndReason, TestError>>,
 ) -> Result<TestEndReason, TestError> {
+    debug!("{{\"_create_run enter");
     let config_file = exec_config.get_config_file().clone();
     let config_file2 = config_file.clone();
+    debug!("{{\"_create_run spawn_blocking start");
     let (file, config_bytes) = spawn_blocking(|| {
-        let mut file = File::open(config_file.clone())
-            .map_err(|_| TestError::InvalidConfigFilePath(config_file.clone()))?;
+        debug!("{{\"_create_run spawn_blocking enter");
+        let mut file = File::open(config_file.clone()).map_err(|err| {
+            error!(
+                "File::open({}) error: {}",
+                config_file.clone().to_str().unwrap_or_default(),
+                err
+            );
+            TestError::InvalidConfigFilePath(config_file.clone())
+        })?;
         let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)
-            .map_err(|e| TestError::CannotOpenFile(config_file, e.into()))?;
+        file.read_to_end(&mut bytes).map_err(|e| {
+            error!(
+                "File::read_to_end({}) error: {}",
+                config_file.to_str().unwrap_or_default(),
+                e
+            );
+            TestError::CannotOpenFile(config_file, e.into())
+        })?;
+        debug!("{{\"_create_run spawn_blocking exit");
         Ok::<_, TestError>((file, bytes))
     })
     .await
     .map_err(move |e| {
+        warn!("config file error: {}", e);
         let e = IOError::new(IOErrorKind::Other, e);
         TestError::CannotOpenFile(config_file2, e.into())
     })??;
 
     // watch for ctrl-c and kill the test
     let test_ended_tx2 = test_ended_tx.clone();
-    let mut test_ended_rx2 = test_ended_tx.subscribe();
+    let mut test_ended_rx2 = BroadcastStream::new(test_ended_tx.subscribe());
+    debug!("_create_run tokio::spawn future::poll_fn ctrl-c");
     tokio::spawn(future::poll_fn(move |cx| {
         match ctrlc_channel.poll_next_unpin(cx) {
             Poll::Ready(r) => {
@@ -296,13 +341,17 @@ async fn _create_run(
         }
     }));
 
-    let env_vars = std::env::vars_os()
+    let env_vars: BTreeMap<String, String> = std::env::vars_os()
         .map(|(k, v)| (k.to_string_lossy().into(), v.to_string_lossy().into()))
         .collect();
+    // Don't log the values in case there are passwords
+    debug!("env_vars={:?}", env_vars.clone().keys());
+    log::trace!("env_vars={:?}", env_vars.clone());
     let output_format = exec_config.get_output_format();
     let config_file_path = exec_config.get_config_file().clone();
     let mut config =
         config::LoadTest::from_config(&config_bytes, exec_config.get_config_file(), &env_vars)?;
+    debug!("config::LoadTest::from_config finished");
     let test_runner = match exec_config {
         ExecConfig::Try(t) => {
             create_try_run_future(config, t, test_ended_tx.clone(), stdout, stderr).map(Either::A)
@@ -317,14 +366,13 @@ async fn _create_run(
                 &r.config_file,
             )?;
 
-            let (stats_tx, stats_rx) = create_stats_channel(
+            let stats_tx = create_stats_channel(
                 test_ended_tx.clone(),
                 &config.config.general,
                 &providers,
                 stdout.clone(),
                 &r,
             )?;
-            tokio::spawn(stats_rx);
 
             let providers = Arc::new(providers);
 
@@ -358,6 +406,7 @@ async fn _create_run(
     };
     match test_runner {
         Ok(f) => {
+            debug!("_create_run tokio::spawn test_runner");
             tokio::spawn(f);
             let mut test_result = Ok(TestEndReason::Completed);
             while let Some(v) = test_ended_rx.next().await {
@@ -386,7 +435,12 @@ where
     So: Write + Send + 'static,
     Se: Write + Send + 'static,
 {
+    debug!(
+        "{{\"method\":\"create_run enter\",\"exec_config\":{}}}",
+        exec_config
+    );
     let (test_ended_tx, test_ended_rx) = broadcast::channel(1);
+    let test_ended_rx = BroadcastStream::new(test_ended_rx);
     let output_format = exec_config.get_output_format();
     let (stdout, stdout_done) = blocking_writer(stdout, test_ended_tx.clone(), "stdout".into());
     let (mut stderr, stderr_done) = blocking_writer(stderr, test_ended_tx.clone(), "stderr".into());
@@ -403,12 +457,13 @@ where
     match test_result {
         Err(e) => {
             // send the test end message to ensure the stats channel closes
+            error!("TestError: {}", e);
             let _ = test_ended_tx.send(Ok(TestEndReason::Completed));
             let msg = match output_format {
                 RunOutputFormat::Human => format!("\n{} {}\n", Paint::red("Fatal error").bold(), e),
                 RunOutputFormat::Json => {
-                    let json = json::json!({"type": "fatal", "msg": format!("{}", e)});
-                    format!("{}\n", json)
+                    let json = json::json!({"type": "fatal", "msg": format!("{e}")});
+                    format!("{json}\n")
                 }
             };
             let _ = stderr.send(MsgType::Final(msg)).await;
@@ -452,7 +507,9 @@ where
             };
             let _ = stderr.send(MsgType::Final(msg)).await;
         }
-        _ => (),
+        // Instead of implementing Display for TestEndReason, just log these other two
+        Ok(TestEndReason::Completed) => info!("Test Ended with: Completed"),
+        Ok(TestEndReason::ConfigUpdate(_)) => info!("Test Ended with: ConfigUpdate"),
     };
     drop(stderr);
     // wait for all stderr and stdout output to be written
@@ -476,9 +533,9 @@ fn create_config_watcher(
     mut previous_providers: Arc<BTreeMap<String, providers::Provider>>,
 ) {
     let start_time = Instant::now();
-    let mut interval = tokio::time::interval(Duration::from_millis(1000));
+    let mut interval = IntervalStream::new(tokio::time::interval(Duration::from_millis(1000)));
     let mut last_modified = None;
-    let mut test_end_rx = test_ended_tx.subscribe();
+    let mut test_end_rx = BroadcastStream::new(test_ended_tx.subscribe());
     let stream = stream::poll_fn(move |cx| match interval.poll_next_unpin(cx) {
         Poll::Ready(_) => Poll::Ready(Some(())),
         Poll::Pending => match test_end_rx.poll_next_unpin(cx) {
@@ -488,8 +545,16 @@ fn create_config_watcher(
             Poll::Ready(_) => Poll::Ready(None),
         },
     });
+    debug!("{{\"create_config_watcher spawn_blocking start");
     spawn_blocking(move || {
+        debug!("{{\"create_config_watcher spawn_blocking enter");
+        let mut stream_counter = 1;
         for _ in block_on_stream(stream) {
+            debug!(
+                "{{\"create_config_watcher block_on_stream: {}",
+                stream_counter
+            );
+            stream_counter += 1;
             let modified = match file.metadata() {
                 Ok(m) => match m.modified() {
                     Ok(m) => m,
@@ -498,6 +563,7 @@ fn create_config_watcher(
                 Err(_) => continue,
             };
 
+            // Check the last modified. If we don't have one, or it hasn't changed, continue to the next loop
             match last_modified {
                 Some(lm) if modified == lm => continue,
                 None => {
@@ -507,7 +573,8 @@ fn create_config_watcher(
                 _ => last_modified = Some(modified),
             }
 
-            if file.seek(SeekFrom::Start(0)).is_err() {
+            // Last modified has changed
+            if file.rewind().is_err() {
                 continue;
             }
 
@@ -528,7 +595,7 @@ fn create_config_watcher(
                         ),
                         RunOutputFormat::Json => {
                             let json = json::json!({"type": "warn", "msg": format!("{} {}", "could not reload config file", e)});
-                            format!("{}\n", json)
+                            format!("{json}\n")
                         }
                     };
                     let _ = block_on(stderr.send(MsgType::Other(msg)));
@@ -556,7 +623,7 @@ fn create_config_watcher(
                         ),
                         RunOutputFormat::Json => {
                             let json = json::json!({"type": "warn", "msg": format!("{} {}", "could not reload config file", e)});
-                            format!("{}\n", json)
+                            format!("{json}\n")
                         }
                     };
                     let _ = block_on(stderr.send(MsgType::Other(msg)));
@@ -610,7 +677,7 @@ fn create_config_watcher(
                         ),
                         RunOutputFormat::Json => {
                             let json = json::json!({"type": "warn", "msg": format!("{} {}", "could not reload config file", e)});
-                            format!("{}\n", json)
+                            format!("{json}\n")
                         }
                     };
                     let _ = block_on(stderr.send(MsgType::Other(msg)));
@@ -618,8 +685,10 @@ fn create_config_watcher(
                 }
             };
 
+            debug!("create_config_watcher tokio::spawn create_load_test_future");
             tokio::spawn(f);
         }
+        debug!("{{\"create_config_watcher spawn_blocking exit");
     });
 }
 
@@ -630,28 +699,31 @@ fn create_try_run_future(
     stdout: FCSender<MsgType>,
     stderr: FCSender<MsgType>,
 ) -> Result<impl Future<Output = ()>, TestError> {
+    debug!("create_try_run_future start");
+    // create a logger for the try run
+    // request.headers only logs single Accept Headers due to JSON requirements. Use headers_all instead
     let select = if let TryRunFormat::Human = try_config.format {
         r#""`\
          Request\n\
          ========================================\n\
          ${request['start-line']}\n\
-         ${join(request.headers, '\n', ': ')}\n\
+         ${join(request.headers_all, '\n', ': ')}\n\
          ${if(request.body != '', '\n${request.body}\n', '')}\n\
          Response (RTT: ${stats.rtt}ms)\n\
          ========================================\n\
          ${response['start-line']}\n\
-         ${join(response.headers, '\n', ': ')}\n\
+         ${join(response.headers_all, '\n', ': ')}\n\
          ${if(response.body != '', '\n${response.body}', '')}\n\n`""#
     } else {
         r#"{
             "request": {
                 "start-line": "request['start-line']",
-                "headers": "request.headers",
+                "headers": "request.headers_all",
                 "body": "request.body"
             },
             "response": {
                 "start-line": "response['start-line']",
-                "headers": "response.headers",
+                "headers": "response.headers_all",
                 "body": "response.body"
             },
             "stats": {
@@ -659,11 +731,13 @@ fn create_try_run_future(
             }
         })"#
     };
-    let to = try_config.file.unwrap_or_else(|| "stderr".into());
-    let logger = config::LoggerPreProcessed::from_str(&select, &to).unwrap();
+    let to = try_config.file.unwrap_or_else(|| "stdout".into());
+    let logger = config::LoggerPreProcessed::from_str(select, &to).unwrap();
     if !try_config.loggers_on {
+        debug!("loggers_on: {}. Clearing Loggers", try_config.loggers_on);
         config.clear_loggers();
     }
+    debug!("try logger: {:?}", logger);
     config.add_logger("try_run".into(), logger)?;
 
     let config_config = config.config;
@@ -676,6 +750,7 @@ fn create_try_run_future(
         &try_config.config_file,
     )?;
 
+    // setup "filters" which decide which endpoints are included in this try run
     let filters: Vec<_> = try_config
         .filters
         .unwrap_or_default()
@@ -686,7 +761,7 @@ fn create_try_run_future(
                 TryFilter::Ne(key, right) => (false, key, right),
             };
             let right = right.split('*').map(regex::escape).join(".*?");
-            let right = format!("^{}$", right);
+            let right = format!("^{right}$");
             (
                 is_eq,
                 key,
@@ -714,12 +789,13 @@ fn create_try_run_future(
         config.loggers,
         try_config.results_dir.as_ref(),
         &test_ended_tx,
-        stdout,
-        stderr.clone(),
+        &stdout,
+        &stderr,
     )?;
 
     let mut endpoints = Endpoints::new();
 
+    // create the endpoints
     for mut endpoint in config.endpoints.into_iter() {
         let required_providers = mem::take(&mut endpoint.required_providers);
 
@@ -752,14 +828,15 @@ fn create_try_run_future(
             })
             .collect::<Result<_, _>>()?;
 
-        let builder = request::Builder::new(endpoint, None);
+        let builder = request::EndpointBuilder::new(endpoint, None);
         endpoints.append(static_tags, builder, provides_set, required_providers);
     }
 
     let client = create_http_client(config_config.client.keepalive)?;
 
-    let (stats_tx, stats_rx) = create_try_run_stats_channel(test_ended_tx.subscribe(), stderr);
-    tokio::spawn(stats_rx);
+    // create the stats channel
+    let test_complete = BroadcastStream::new(test_ended_tx.subscribe());
+    let stats_tx = create_try_run_stats_channel(test_complete, stderr);
 
     let mut builder_ctx = request::BuilderContext {
         config: config_config,
@@ -772,7 +849,7 @@ fn create_try_run_future(
 
     let endpoint_calls = endpoints.build(filter_fn, &mut builder_ctx, &response_providers)?;
 
-    let mut test_ended_rx = test_ended_tx.subscribe();
+    let mut test_ended_rx = BroadcastStream::new(test_ended_tx.subscribe());
     let mut left = try_join_all(endpoint_calls).map(move |r| {
         let _ = test_ended_tx.send(r.map(|_| TestEndReason::Completed));
     });
@@ -783,6 +860,7 @@ fn create_try_run_future(
             _ => Poll::Pending,
         },
     });
+    debug!("create_try_run_future finish");
     Ok(f)
 }
 
@@ -795,6 +873,7 @@ fn create_load_test_future(
     stdout: FCSender<MsgType>,
     stderr: FCSender<MsgType>,
 ) -> Result<impl Future<Output = ()>, TestError> {
+    debug!("create_load_test_future start");
     config.ok_for_loadtest()?;
 
     let mut duration = config.get_duration();
@@ -809,11 +888,12 @@ fn create_load_test_future(
         config.loggers,
         run_config.results_dir.as_ref(),
         &test_ended_tx,
-        stdout,
-        stderr,
+        &stdout,
+        &stderr,
     )?;
 
     // create the endpoints
+    #[allow(clippy::needless_collect)]
     let builders: Vec<_> = config
         .endpoints
         .into_iter()
@@ -845,7 +925,7 @@ fn create_load_test_future(
                 mod_interval = Some(Box::pin(mod_interval2.into_stream(run_config.start_at)));
             }
 
-            request::Builder::new(endpoint, mod_interval)
+            request::EndpointBuilder::new(endpoint, mod_interval)
         })
         .collect();
 
@@ -867,7 +947,7 @@ fn create_load_test_future(
     let _ = stats_tx.unbounded_send(StatsMessage::Start(duration));
     let mut f = try_join_all(endpoint_calls);
     let mut test_timeout = Delay::new(duration);
-    let mut test_ended_rx = test_ended_tx.subscribe();
+    let mut test_ended_rx = BroadcastStream::new(test_ended_tx.subscribe());
     let f = future::poll_fn(move |cx| match f.poll_unpin(cx) {
         Poll::Ready(r) => {
             let _ = test_ended_tx.send(r.map(|_| TestEndReason::Completed));
@@ -885,6 +965,7 @@ fn create_load_test_future(
         },
     });
 
+    debug!("create_load_test_future finish");
     Ok(f)
 }
 
@@ -908,7 +989,7 @@ fn get_providers_from_config(
     config_providers: &BTreeMap<String, config::Provider>,
     auto_size: usize,
     test_ended_tx: &broadcast::Sender<Result<TestEndReason, TestError>>,
-    config_path: &PathBuf,
+    config_path: &Path,
 ) -> ProvidersResult {
     let mut providers = BTreeMap::new();
     let mut response_providers = BTreeSet::new();
@@ -918,25 +999,25 @@ fn get_providers_from_config(
             config::Provider::File(mut template) => {
                 // the auto_buffer_start_size is not the default
                 if auto_size != default_buffer_size {
-                    if let config::Limit::Auto(limit) = &template.buffer {
-                        limit.store(auto_size, Ordering::Relaxed);
+                    if let config::Limit::Dynamic(_) = &template.buffer {
+                        template.buffer = config::Limit::Dynamic(auto_size);
                     }
                 }
                 util::tweak_path(&mut template.path, config_path);
-                providers::file(template, test_ended_tx.clone())?
+                providers::file(template, test_ended_tx.clone(), name)?
             }
-            config::Provider::Range(range) => providers::range(range),
-            config::Provider::Response(template) => {
+            config::Provider::Range(range) => providers::range(range, name),
+            config::Provider::Response(mut template) => {
                 // the auto_buffer_start_size is not the default
                 if auto_size != default_buffer_size {
-                    if let config::Limit::Auto(limit) = &template.buffer {
-                        limit.store(auto_size, Ordering::Relaxed);
+                    if let config::Limit::Dynamic(_) = &template.buffer {
+                        template.buffer = config::Limit::Dynamic(auto_size);
                     }
                 }
                 response_providers.insert(name.clone());
-                providers::response(template)
+                providers::response(template, name)
             }
-            config::Provider::List(values) => providers::literals(values.clone()),
+            config::Provider::List(values) => providers::list(values.clone(), name),
         };
         providers.insert(name.clone(), provider);
     }
@@ -947,8 +1028,8 @@ fn get_loggers_from_config(
     config_loggers: BTreeMap<String, config::Logger>,
     results_dir: Option<&PathBuf>,
     test_ended_tx: &broadcast::Sender<Result<TestEndReason, TestError>>,
-    stdout: FCSender<MsgType>,
-    stderr: FCSender<MsgType>,
+    stdout: &FCSender<MsgType>,
+    stderr: &FCSender<MsgType>,
 ) -> Result<BTreeMap<String, providers::Logger>, TestError> {
     config_loggers
         .into_iter()
@@ -975,7 +1056,7 @@ fn get_loggers_from_config(
                     .0
                 }
             };
-            let sender = providers::logger(template, &test_ended_tx, writer);
+            let sender = providers::logger(template, test_ended_tx, writer);
             Ok((name, sender))
         })
         .collect()

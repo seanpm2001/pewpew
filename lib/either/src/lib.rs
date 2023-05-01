@@ -9,6 +9,7 @@ use std::{
 
 use futures::Stream;
 
+/// Allows the mapping of two different (similar) types to determine either A or B.
 pub enum Either<A, B> {
     A(A),
     B(B),
@@ -37,6 +38,7 @@ impl<A, B> Either<A, B> {
 }
 
 impl<A> Either<A, A> {
+    /// If both types are the same, allow unwrap
     pub fn unwrap(self) -> A {
         match self {
             Either::A(a) => a,
@@ -97,8 +99,8 @@ where
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match &self {
-            Either::A(a) => write!(f, "{}", a),
-            Either::B(b) => write!(f, "{}", b),
+            Either::A(a) => write!(f, "{a}"),
+            Either::B(b) => write!(f, "{b}"),
         }
     }
 }
@@ -110,8 +112,8 @@ where
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match &self {
-            Either::A(a) => write!(f, "Either::A({:?})", a),
-            Either::B(b) => write!(f, "Either::B({:?})", b),
+            Either::A(a) => write!(f, "Either::A({a:?})"),
+            Either::B(b) => write!(f, "Either::B({b:?})"),
         }
     }
 }
@@ -147,6 +149,7 @@ where
     }
 }
 
+/// Allows the mapping of three different (similar) types to determine either A, B, or C.
 pub enum Either3<A, B, C> {
     A(A),
     B(B),
@@ -230,9 +233,9 @@ where
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match &self {
-            Either3::A(a) => write!(f, "Either::A({:?})", a),
-            Either3::B(b) => write!(f, "Either::B({:?})", b),
-            Either3::C(c) => write!(f, "Either::C({:?})", c),
+            Either3::A(a) => write!(f, "Either::A({a:?})"),
+            Either3::B(b) => write!(f, "Either::B({b:?})"),
+            Either3::C(c) => write!(f, "Either::C({c:?})"),
         }
     }
 }
@@ -245,9 +248,9 @@ where
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match &self {
-            Either3::A(a) => write!(f, "{}", a),
-            Either3::B(b) => write!(f, "{}", b),
-            Either3::C(c) => write!(f, "{}", c),
+            Either3::A(a) => write!(f, "{a}"),
+            Either3::B(b) => write!(f, "{b}"),
+            Either3::C(c) => write!(f, "{c}"),
         }
     }
 }

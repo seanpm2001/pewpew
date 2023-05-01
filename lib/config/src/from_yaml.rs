@@ -123,7 +123,7 @@ impl FromYaml for NonZeroU16 {
         event
             .as_x()
             .map(|i| (i, marker))
-            .ok_or_else(|| Error::YamlDeserialize(None, marker))
+            .ok_or(Error::YamlDeserialize(None, marker))
     }
 }
 
@@ -133,7 +133,7 @@ impl FromYaml for NonZeroUsize {
         event
             .as_x()
             .map(|i| (i, marker))
-            .ok_or_else(|| Error::YamlDeserialize(None, marker))
+            .ok_or(Error::YamlDeserialize(None, marker))
     }
 }
 
@@ -143,7 +143,7 @@ impl FromYaml for i64 {
         event
             .as_x()
             .map(|i| (i, marker))
-            .ok_or_else(|| Error::YamlDeserialize(None, marker))
+            .ok_or(Error::YamlDeserialize(None, marker))
     }
 }
 
@@ -153,7 +153,7 @@ impl FromYaml for usize {
         event
             .as_x()
             .map(|i| (i, marker))
-            .ok_or_else(|| Error::YamlDeserialize(None, marker))
+            .ok_or(Error::YamlDeserialize(None, marker))
     }
 }
 
@@ -206,7 +206,7 @@ impl YamlEvent {
 
     pub fn as_x<F: FromStr>(&self) -> Option<F> {
         if let YamlEvent::Scalar(s, TScalarStyle::Plain, _) = self {
-            F::from_str(&s).ok()
+            F::from_str(s).ok()
         } else {
             None
         }
@@ -340,7 +340,8 @@ impl<V> Insert for Vec<V> {
     }
 }
 
-#[cfg_attr(debug_assertions, derive(Debug, PartialEq))]
+#[cfg_attr(debug_assertions, derive(PartialEq, Eq))]
+#[derive(Debug)]
 pub struct TupleVec<K, V>(pub Vec<(K, V)>);
 
 impl<K, V> Default for TupleVec<K, V> {
@@ -460,21 +461,16 @@ where
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub enum Nullable<T> {
     Some(T),
+    #[default]
     Null,
 }
 
-impl<T> Default for Nullable<T> {
-    fn default() -> Self {
-        Nullable::Null
-    }
-}
-
-impl<T> Into<Option<T>> for Nullable<T> {
-    fn into(self) -> Option<T> {
-        match self {
+impl<T> From<Nullable<T>> for Option<T> {
+    fn from(n: Nullable<T>) -> Option<T> {
+        match n {
             Nullable::Some(t) => Some(t),
             Nullable::Null => None,
         }

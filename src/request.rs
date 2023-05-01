@@ -6,14 +6,14 @@ mod response_handler;
 use self::body_handler::BodyHandler;
 use self::request_maker::RequestMaker;
 
+use log::debug;
 use request_maker::ProviderDelays;
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use ether::{Either, Either3, EitherExt};
 use for_each_parallel::ForEachParallel;
 use futures::{
     channel::mpsc as futures_channel,
-    executor::block_on,
     future::{self, try_join_all},
     sink::SinkExt,
     stream, FutureExt, Stream, StreamExt, TryFutureExt, TryStreamExt,
@@ -27,7 +27,10 @@ use hyper_tls::HttpsConnector;
 use rand::distributions::{Alphanumeric, Distribution};
 use select_any::select_any;
 use serde_json as json;
-use tokio::task::spawn_blocking;
+use tokio::{
+    fs::File as TokioFile,
+    io::{AsyncRead, ReadBuf},
+};
 use zip_all::zip_all;
 
 use crate::error::{RecoverableError, TestError};
@@ -41,9 +44,7 @@ use config::{
 use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},
-    fs::File,
     future::Future,
-    io::{Error as IOError, ErrorKind as IOErrorKind, Read},
     num::NonZeroUsize,
     ops::{Deref, DerefMut},
     path::PathBuf,
@@ -75,6 +76,7 @@ impl AutoReturn {
     }
 
     pub async fn into_future(mut self) {
+        debug!("AutoReturn::into_future.send_option={:?}", self.send_option);
         match self.send_option {
             EndpointProvidesSendOptions::Block => {
                 let _ = self
@@ -84,11 +86,13 @@ impl AutoReturn {
             }
             EndpointProvidesSendOptions::Force => {
                 while let Some(json) = self.jsons.pop() {
+                    log::trace!("AutoReturn::into_future::Force json={}", json);
                     self.channel.force_send(json);
                 }
             }
             EndpointProvidesSendOptions::IfNotFull => {
                 while let Some(json) = self.jsons.pop() {
+                    log::trace!("AutoReturn::into_future::IfNotFull json={}", json);
                     if self.channel.send(json).now_or_never().is_none() {
                         break;
                     }
@@ -150,6 +154,13 @@ impl ProviderOrLogger {
             Self::Logger(_) => true,
         }
     }
+
+    fn name(&self) -> String {
+        match &self {
+            Self::Provider(provider) => format!("Provider: {}", provider.name()),
+            Self::Logger(logger) => format!("Logger: {logger:?}"),
+        }
+    }
 }
 
 struct Outgoing {
@@ -201,17 +212,21 @@ pub struct BuilderContext {
     pub stats_tx: StatsTx,
 }
 
-pub struct Builder {
+pub struct EndpointBuilder {
     endpoint: config::Endpoint,
     start_stream: Option<Pin<Box<dyn Stream<Item = (Instant, Option<Instant>)> + Send>>>,
 }
 
-impl Builder {
+fn convert_to_debug<T>(value: &[(String, T)]) -> Vec<String> {
+    value.iter().map(|(key, _)| key.to_string()).collect()
+}
+
+impl EndpointBuilder {
     pub fn new(
         endpoint: config::Endpoint,
         start_stream: Option<Pin<Box<dyn Stream<Item = (Instant, Option<Instant>)> + Send>>>,
     ) -> Self {
-        Builder {
+        EndpointBuilder {
             endpoint,
             start_stream,
         }
@@ -236,6 +251,10 @@ impl Builder {
             request_timeout,
             ..
         } = self.endpoint;
+        debug!("EndpointBuilder.build method=\"{}\" url=\"{}\" body=\"{}\" headers=\"{:?}\" no_auto_returns=\"{}\" \
+            max_parallel_requests=\"{:?}\" provides=\"{:?}\" logs=\"{:?}\" on_demand=\"{}\" request_timeout=\"{:?}\"",
+            method.as_str(), url.evaluate_with_star(), body, convert_to_debug(&headers), no_auto_returns,
+            max_parallel_requests, convert_to_debug(&provides), convert_to_debug(&logs), on_demand, request_timeout);
 
         let timeout = request_timeout.unwrap_or(ctx.config.client.request_timeout);
 
@@ -244,9 +263,12 @@ impl Builder {
         } else {
             None
         };
+        // Build the actual provider set "outgoing"
         let provides = provides
             .into_iter()
             .map(|(k, v)| {
+                debug!("EndpointBuilder.build provide method=\"{}\" url=\"{}\" provide=\"{:?}\" provides=\"{:?}\"",
+                    method.as_str(), url.evaluate_with_star(), k, v);
                 let provider = ctx
                     .providers
                     .get(&k)
@@ -256,12 +278,13 @@ impl Builder {
                     set.insert(tx.clone());
                 }
                 if on_demand {
-                    let stream = provider.on_demand.clone().into_stream();
+                    let stream = provider.on_demand.clone();
                     on_demand_streams.push(Box::new(stream));
                 }
                 Outgoing::new(v, ProviderOrLogger::Provider(tx))
             })
             .collect();
+
         let mut streams: StreamCollection = Vec::new();
         if let Some(start_stream) = self.start_stream {
             streams.push((
@@ -279,13 +302,20 @@ impl Builder {
             });
             streams.push((true, Box::new(stream)));
         }
+        // Add any loggers to the outgoing providers/loggers
         for (k, v) in logs {
+            debug!(
+                "EndpointBuilder.build logs key=\"{}\" Select=\"{:?}\"",
+                k, v
+            );
             let tx = ctx
                 .loggers
                 .get(&k)
                 .expect("logs should reference a valid logger");
             outgoing.push(Outgoing::new(v, ProviderOrLogger::Logger(tx.clone())));
         }
+        // Required providers
+        // these u16s are bitwise maps of what standard select request/response/stats are selected
         let rr_providers = providers_to_stream.get_special();
         let precheck_rr_providers = providers_to_stream.get_where_special();
         // go through the list of required providers and make sure we have them all
@@ -294,6 +324,7 @@ impl Builder {
                 Some(p) => p,
                 None => continue,
             };
+            debug!("EndpointBuilder.build unique_providers name=\"{}\"", name);
             let receiver = provider.rx.clone();
             let ar = provider
                 .auto_return
@@ -314,7 +345,12 @@ impl Builder {
             }));
             streams.push((false, provider_stream));
         }
+
         for (name, vce) in self.endpoint.declare {
+            debug!(
+                "EndpointBuilder.build declare name=\"{}\" valueOrExpression=\"{:?}\"",
+                name, vce
+            );
             let stream = vce
                 .into_stream(&ctx.providers, false)
                 .map_ok(move |(v, returns)| {
@@ -333,9 +369,9 @@ impl Builder {
             method,
             no_auto_returns,
             on_demand_streams,
-            outgoing,
+            outgoing, // loggers
             precheck_rr_providers,
-            provides,
+            provides, // providers
             rr_providers,
             tags: Arc::new(tags),
             stats_tx,
@@ -353,15 +389,16 @@ pub enum StreamItem {
     TemplateValue(String, json::Value, Option<AutoReturn>, Instant),
 }
 
-fn multipart_body_as_hyper_body<'a>(
+fn multipart_body_as_hyper_body(
     multipart_body: &MultipartBody,
     template_values: &TemplateValues,
-    content_type_entry: HeaderEntry<'a, HeaderValue>,
+    content_type_entry: HeaderEntry<'_, HeaderValue>,
     copy_body_value: bool,
     body_value: &mut Option<String>,
 ) -> Result<impl Future<Output = Result<(u64, HyperBody), TestError>>, TestError> {
     let boundary: String = Alphanumeric
         .sample_iter(&mut rand::thread_rng())
+        .map(char::from)
         .take(20)
         .collect();
 
@@ -375,12 +412,12 @@ fn multipart_body_as_hyper_body<'a>(
         if ct_str.starts_with("multipart/") {
             let is_form = ct_str.starts_with("multipart/form-data");
             *content_type =
-                HeaderValue::from_str(&format!("{};boundary={}", ct_str, boundary))
+                HeaderValue::from_str(&format!("{ct_str};boundary={boundary}"))
                     .map_err::<TestError, _>(|e| RecoverableError::BodyErr(Arc::new(e)).into())?;
             is_form
         } else {
             *content_type =
-                HeaderValue::from_str(&format!("multipart/form-data;boundary={}", boundary))
+                HeaderValue::from_str(&format!("multipart/form-data;boundary={boundary}"))
                     .map_err::<TestError, _>(|e| RecoverableError::BodyErr(Arc::new(e)).into())?;
             true
         }
@@ -506,57 +543,41 @@ fn multipart_body_as_hyper_body<'a>(
     Ok(ret)
 }
 
-fn create_file_hyper_body(
-    filename: String,
-) -> impl Future<Output = Result<(u64, HyperBody), TestError>> {
-    let filename2 = filename.clone();
-    spawn_blocking(|| {
-        let mut file = match File::open(&filename) {
-            Ok(f) => f,
-            Err(e) => return Err(TestError::FileReading(filename, e.into())),
-        };
-        let metadata = match file.metadata() {
-            Ok(m) => m,
-            Err(e) => return Err(TestError::FileReading(filename, e.into())),
-        };
-        let bytes = metadata.len();
+async fn create_file_hyper_body(filename: String) -> Result<(u64, HyperBody), TestError> {
+    let mut file = match TokioFile::open(&filename).await {
+        Ok(f) => f,
+        Err(e) => return Err(TestError::FileReading(filename, e.into())),
+    };
+    let bytes = match file.metadata().await {
+        Ok(m) => m.len(),
+        Err(e) => return Err(TestError::FileReading(filename, e.into())),
+    };
 
-        let (mut tx, rx) = futures_channel::channel(5);
-        let mut buf = BytesMut::with_capacity(8 * (1 << 10));
-
-        spawn_blocking(move || loop {
-            match file.read(&mut buf) {
-                Ok(n) if n == 0 => break,
-                Ok(n) => {
-                    let bytes_to_send = buf.split_off(n);
-                    if block_on(tx.send(Ok(bytes_to_send))).is_err() {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    let _ = block_on(tx.send(Err(e)));
-                    break;
-                }
+    let stream = stream::poll_fn(move |cx| {
+        let mut buffer = vec![0; 8192];
+        let mut buf = ReadBuf::new(&mut buffer);
+        match Pin::new(&mut file).poll_read(cx, &mut buf) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(e)) => Poll::Ready(Some(Err(e))),
+            Poll::Ready(Ok(_)) if buf.filled().is_empty() => Poll::Ready(None),
+            Poll::Ready(Ok(_)) => {
+                let len = buf.filled().len();
+                buffer.truncate(len);
+                Poll::Ready(Some(Ok(buffer)))
             }
-        });
+        }
+    });
 
-        let body = HyperBody::wrap_stream(rx);
-        Ok((bytes, body))
-    })
-    .map(|r| {
-        r.map_err(|e| {
-            let e = IOError::new(IOErrorKind::Other, e);
-            TestError::FileReading(filename2, e.into())
-        })?
-    })
+    let body = HyperBody::wrap_stream(stream);
+    Ok((bytes, body))
 }
 
-fn body_template_as_hyper_body<'a>(
+fn body_template_as_hyper_body(
     body_template: &BodyTemplate,
     template_values: &TemplateValues,
     copy_body_value: bool,
     body_value: &mut Option<String>,
-    content_type_entry: HeaderEntry<'a, HeaderValue>,
+    content_type_entry: HeaderEntry<'_, HeaderValue>,
 ) -> impl Future<Output = Result<(u64, HyperBody), TestError>> {
     let template = match body_template {
         BodyTemplate::File(_, t) => t,
@@ -580,7 +601,7 @@ fn body_template_as_hyper_body<'a>(
     if let BodyTemplate::File(path, _) = body_template {
         tweak_path(&mut body, path);
         if copy_body_value {
-            *body_value = Some(format!("<<contents of file: {}>>", body));
+            *body_value = Some(format!("<<contents of file: {body}>>"));
         }
         Either3::C(create_file_hyper_body(body))
     } else {
@@ -627,6 +648,7 @@ impl Endpoint {
         S: Stream<Item = Result<StreamItem, TestError>> + Send + Unpin + 'static,
     {
         let stream = Box::new(stream);
+        // If we have one, replace it, otherwise add (set as 0) it
         match self.stream_collection.get_mut(0) {
             Some((true, s)) => {
                 *s = stream;
@@ -683,6 +705,10 @@ impl Endpoint {
                 _ => None,
             })
             .collect();
+        debug!(
+            "into_future method=\"{}\" url=\"{:?}\" request_headers={:?} tags={:?}",
+            method, url, headers, tags
+        );
         let rm = RequestMaker {
             url,
             method,
@@ -707,7 +733,7 @@ impl Endpoint {
                             (0usize, false, true),
                             |(empty_slots, has_empty, all_full), tx| {
                                 let count = tx.len();
-                                let limit = tx.limit().get();
+                                let limit = tx.limit();
                                 (
                                     empty_slots.max(limit.saturating_sub(count)),
                                     has_empty || count == 0,
@@ -749,7 +775,7 @@ impl Endpoint {
                             (0usize, false, true),
                             |(empty_slots, has_empty, all_full), tx| {
                                 let count = tx.len();
-                                let limit = tx.limit().get();
+                                let limit = tx.limit();
                                 (
                                     empty_slots.max(limit.saturating_sub(count)),
                                     has_empty || count == 0,
@@ -814,37 +840,42 @@ impl<V: Iterator<Item = Result<json::Value, RecoverableError>> + Unpin> Future f
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         loop {
-            let v = match self.next_value.take() {
-                Some(v) => v,
+            // Check if there's a self.next_value
+            let value_to_add = match self.next_value.take() {
+                Some(next_value) => next_value,
+                // Check the values list if there isn't one already in self.next_value
                 None => match self.values.next() {
-                    Some(Ok(v)) => v,
+                    Some(Ok(v)) => v, // Got a value from self.values
                     Some(Err(e)) => return Poll::Ready(Err(e)),
-                    None => break,
+                    None => break, // self.values is empty
                 },
             };
+            // We've got a value. Check the tx status
             match &mut self.tx {
                 ProviderOrLogger::Logger(tx) => match tx.poll_ready_unpin(cx) {
                     Poll::Ready(Ok(())) => {
-                        if tx.start_send_unpin(v).is_err() {
+                        if tx.start_send_unpin(value_to_add).is_err() {
                             break;
                         }
                         self.value_added = true;
                     }
                     Poll::Pending => {
-                        self.next_value = Some(v);
+                        // tx not ready, put it (back) in next_value
+                        self.next_value = Some(value_to_add);
                         return Poll::Pending;
                     }
                     Poll::Ready(Err(_)) => break,
                 },
                 ProviderOrLogger::Provider(tx) => match tx.poll_ready_unpin(cx) {
                     Poll::Ready(Ok(())) => {
-                        if tx.start_send_unpin(v).is_err() {
+                        if tx.start_send_unpin(value_to_add).is_err() {
                             break;
                         }
                         self.value_added = true;
                     }
                     Poll::Pending => {
-                        self.next_value = Some(v);
+                        // tx not ready, put it (back) in next_value
+                        self.next_value = Some(value_to_add);
                         return Poll::Pending;
                     }
                     Poll::Ready(Err(_)) => break,
@@ -854,12 +885,12 @@ impl<V: Iterator<Item = Result<json::Value, RecoverableError>> + Unpin> Future f
         if self.value_added {
             match &mut self.tx {
                 ProviderOrLogger::Logger(tx) => {
-                    if let Poll::Pending = tx.poll_flush_unpin(cx) {
+                    if tx.poll_flush_unpin(cx).is_pending() {
                         return Poll::Pending;
                     }
                 }
                 ProviderOrLogger::Provider(tx) => {
-                    if let Poll::Pending = tx.poll_flush_unpin(cx) {
+                    if tx.poll_flush_unpin(cx).is_pending() {
                         return Poll::Pending;
                     }
                 }
@@ -872,5 +903,29 @@ impl<V: Iterator<Item = Result<json::Value, RecoverableError>> + Unpin> Future f
 impl<V: Iterator<Item = Result<json::Value, RecoverableError>> + Unpin> Drop for BlockSender<V> {
     fn drop(&mut self) {
         self.now_or_never();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use stream::StreamExt;
+    use tokio::runtime::Runtime;
+
+    #[test]
+    fn file_bodies_work() {
+        let f = async {
+            let (_, body) = create_file_hyper_body("tests/test.jpg".to_string())
+                .await
+                .unwrap();
+            body.map(|b| stream::iter(b.unwrap()))
+                .flatten()
+                .collect::<Vec<_>>()
+                .await
+        };
+        let rt = Runtime::new().unwrap();
+        let streamed_bytes = rt.block_on(f);
+        let file_bytes = include_bytes!("../tests/test.jpg").to_vec();
+        assert_eq!(file_bytes, streamed_bytes);
     }
 }

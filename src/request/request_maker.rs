@@ -17,6 +17,7 @@ use hyper::{
     Client, Method, Request,
 };
 use hyper_tls::HttpsConnector;
+use log::{debug, info};
 use serde_json as json;
 
 use super::{
@@ -199,6 +200,8 @@ impl RequestMaker {
             if content_length > 0 {
                 headers.insert(CONTENT_LENGTH, content_length.into());
             }
+            debug!("final headers={:?}", headers);
+            info!("RequestMaker method=\"{}\" url=\"{}\" request_headers={:?} tags={:?}", method, url.as_str(), headers, tags);
             let mut request_provider = json::json!({});
             let request_obj = request_provider
                 .as_object_mut()
@@ -207,7 +210,7 @@ impl RequestMaker {
                 // add in the url
                 let mut protocol: String = url.scheme().into();
                 if !protocol.is_empty() {
-                    protocol = format!("{}:", protocol);
+                    protocol = format!("{protocol}:");
                 }
                 let search_params: json::Map<String, json::Value> = url
                     .query_pairs()
@@ -216,7 +219,7 @@ impl RequestMaker {
                 request_obj.insert(
                     "url".into(),
                     json::json!({
-                        "hash": url.fragment().map(|s| format!("#{}", s)).unwrap_or_else(|| "".into()),
+                        "hash": url.fragment().map(|s| format!("#{s}")).unwrap_or_else(|| "".into()),
                         "host": url.host_str().unwrap_or(""),
                         "hostname": url.domain().unwrap_or(""),
                         "href": url.as_str(),
@@ -225,7 +228,7 @@ impl RequestMaker {
                         "pathname": url.path(),
                         "port": url.port().map(|n| n.to_string()).unwrap_or_else(|| "".into()),
                         "protocol": protocol,
-                        "search": url.query().map(|s| format!("?{}", s)).unwrap_or_else(|| "".into()),
+                        "search": url.query().map(|s| format!("?{s}")).unwrap_or_else(|| "".into()),
                         "searchParams": search_params,
                         "username": url.username(),
                     }),
@@ -240,7 +243,7 @@ impl RequestMaker {
                 let version = request.version();
                 request_obj.insert(
                     "start-line".into(),
-                    format!("{} {} {:?}", method, url_path_and_query, version).into(),
+                    format!("{method} {url_path_and_query} {version:?}").into(),
                 );
             }
             if rr_providers & REQUEST_HEADERS != 0 {
@@ -344,7 +347,7 @@ impl RequestMaker {
                     let mut futures = Vec::new();
                     if outgoing2.iter().any(|o| o.tx.is_logger()) {
                         let error = json::json!({
-                            "msg": format!("{}", r),
+                            "msg": format!("{r}"),
                             "code": r.code(),
                         });
                         template_values2.insert("error".into(), error);
@@ -400,7 +403,7 @@ mod tests {
 
     #[test]
     fn sends_request() {
-        let mut rt = Runtime::new().unwrap();
+        let rt = Runtime::new().unwrap();
         rt.block_on(async move {
             let (port, ..) = test_common::start_test_server(None);
             let url = Template::simple(&format!("https://127.0.0.1:{}", port));

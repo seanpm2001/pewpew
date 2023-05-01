@@ -7,6 +7,7 @@ use futures::{
     future::{select_all, try_join_all},
     FutureExt, TryFutureExt,
 };
+use log::debug;
 use serde_json as json;
 
 use std::{
@@ -20,14 +21,14 @@ use std::{
 use super::{BlockSender, Outgoing, ProviderDelays, ProviderOrLogger, StatsTx, TemplateValues};
 
 pub(super) struct BodyHandler {
-    pub(super) now: Instant,
-    pub(super) provider_delays: ProviderDelays,
-    pub(super) template_values: TemplateValues,
     pub(super) included_outgoing_indexes: BTreeSet<usize>,
+    pub(super) now: Instant,
     pub(super) outgoing: Arc<Vec<Outgoing>>,
+    pub(super) provider_delays: ProviderDelays,
     pub(super) stats_tx: StatsTx,
     pub(super) status: u16,
     pub(super) tags: Arc<BTreeMap<String, Template>>,
+    pub(super) template_values: TemplateValues,
 }
 
 impl BodyHandler {
@@ -79,10 +80,10 @@ impl BodyHandler {
             if let stats::StatKind::RecoverableError(e) = &kind {
                 if has_logger {
                     let error = json::json!({
-                        "msg": format!("{}", e),
+                        "msg": format!("{e}"),
                         "code": e.code(),
                     });
-                    let mut tv = (&*template_values2).clone();
+                    let mut tv = (*template_values2).clone();
                     tv.as_object_mut()
                         .expect("should be a json object")
                         .insert("error".into(), error);
@@ -138,7 +139,12 @@ impl BodyHandler {
                     }
                 };
                 match send_behavior {
+                    // This is where we actually send or block from a request
                     EndpointProvidesSendOptions::Block => {
+                        debug!(
+                            "BodyHandler:handle EndpointProvidesSendOptions::Block {}",
+                            o.tx.name()
+                        );
                         let tx = o.tx.clone();
                         let f = BlockSender::new(iter, tx).into_future().map(|_| Ok(()));
                         if o.tx.is_logger() {
@@ -148,6 +154,10 @@ impl BodyHandler {
                         }
                     }
                     EndpointProvidesSendOptions::Force => {
+                        debug!(
+                            "BodyHandler:handle EndpointProvidesSendOptions::Force {}",
+                            o.tx.name()
+                        );
                         for v in iter {
                             let v = match v {
                                 Ok(v) => v,
@@ -163,6 +173,10 @@ impl BodyHandler {
                         }
                     }
                     EndpointProvidesSendOptions::IfNotFull => {
+                        debug!(
+                            "BodyHandler:handle EndpointProvidesSendOptions::IfNotFull {}",
+                            o.tx.name()
+                        );
                         for v in iter {
                             let v = match v {
                                 Ok(v) => v,
@@ -200,16 +214,16 @@ impl BodyHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use channel::Receiver;
+    use channel::{Limit, Receiver};
     use futures::{channel::mpsc as futures_channel, executor::block_on, StreamExt};
     use maplit::{btreemap, btreeset};
 
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use config::{EndpointProvidesSendOptions::*, Limit, Select};
+    use config::{EndpointProvidesSendOptions::*, Select};
 
     fn create_outgoing(select: Select) -> (Outgoing, Receiver<json::Value>) {
-        let (tx, rx) = channel::channel(Limit::Integer(1));
+        let (tx, rx) = channel::channel(Limit::Static(1), false, &"create_outgoing".to_string());
         (Outgoing::new(select, ProviderOrLogger::Provider(tx)), rx)
     }
 

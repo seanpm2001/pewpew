@@ -1,6 +1,5 @@
-// #[macro_use]
-// extern crate from_yaml_derive;
-
+// This is temporary until a new version of pest is released which no longer requires this
+#![allow(legacy_derive_helpers, clippy::upper_case_acronyms)]
 mod error;
 mod expression_functions;
 mod from_yaml;
@@ -22,19 +21,18 @@ pub use select_parser::{
     REQUEST_HEADERS_ALL, REQUEST_STARTLINE, REQUEST_URL, RESPONSE_BODY, RESPONSE_HEADERS,
     RESPONSE_HEADERS_ALL, RESPONSE_STARTLINE, STATS,
 };
+use serde::Serialize;
 use serde_json as json;
 use yaml_rust::scanner::{Marker, Scanner};
 
+use log::{debug, error, LevelFilter};
 use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},
-    iter,
+    fmt, iter,
     num::{NonZeroU16, NonZeroUsize},
-    path::PathBuf,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
+    path::{Path, PathBuf},
+    str::FromStr,
     time::Duration,
 };
 
@@ -68,17 +66,17 @@ impl FromYaml for Method {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Copy, Clone, Debug)]
 pub enum Limit {
-    Auto(Arc<AtomicUsize>),
-    Integer(usize),
+    Dynamic(usize),
+    Static(usize),
 }
 
 impl PartialEq for Limit {
     fn eq(&self, right: &Self) -> bool {
         match (self, right) {
-            (Limit::Auto(_), Limit::Auto(_)) => true,
-            (Limit::Integer(n), Limit::Integer(n2)) => n == n2,
+            (Limit::Dynamic(_), Limit::Dynamic(_)) => true,
+            (Limit::Static(n), Limit::Static(n2)) => n == n2,
             _ => false,
         }
     }
@@ -88,10 +86,10 @@ impl FromYaml for Limit {
     fn parse<I: Iterator<Item = char>>(decoder: &mut YamlDecoder<I>) -> ParseResult<Self> {
         let (event, marker) = decoder.next()?;
         match event.as_x() {
-            Some(i) => return Ok((Limit::Integer(i), marker)),
+            Some(i) => return Ok((Limit::Static(i), marker)),
             None => {
                 if let Some("auto") = event.as_str() {
-                    return Ok((Limit::auto(), marker));
+                    return Ok((Limit::dynamic(), marker));
                 }
             }
         }
@@ -101,23 +99,24 @@ impl FromYaml for Limit {
 
 impl Default for Limit {
     fn default() -> Self {
-        Limit::auto()
+        Limit::dynamic()
     }
 }
 
 impl Limit {
-    pub fn auto() -> Limit {
-        Limit::Auto(Arc::new(AtomicUsize::new(5)))
+    pub fn dynamic() -> Limit {
+        Limit::Dynamic(5)
     }
 
     pub fn get(&self) -> usize {
         match self {
-            Limit::Auto(a) => a.load(Ordering::Acquire),
-            Limit::Integer(n) => *n,
+            Limit::Dynamic(n) => *n,
+            Limit::Static(n) => *n,
         }
     }
 }
 
+#[cfg_attr(debug_assertions, derive(PartialEq))]
 #[derive(Debug)]
 pub enum HitsPer {
     Second(f32),
@@ -172,7 +171,8 @@ trait DefaultWithMarker {
     fn default(marker: Marker) -> Self;
 }
 
-#[cfg_attr(debug_assertions, derive(Debug, PartialEq))]
+#[cfg_attr(debug_assertions, derive(PartialEq))]
+#[derive(Debug)]
 enum LoadPatternPreProcessed {
     Linear(LinearBuilderPreProcessed),
 }
@@ -188,6 +188,7 @@ impl FromYaml for LoadPatternPreProcessed {
         let ret = match event.into_string() {
             Ok(s) if s.as_str() == "linear" => {
                 let (linear, marker) = FromYaml::parse(decoder)?;
+                log::debug!("LoadPatternPreProcessed.parse linear: {:?}", linear);
                 (LoadPatternPreProcessed::Linear(linear), marker)
             }
             Ok(s) => return Err(Error::UnrecognizedKey(s, None, marker)),
@@ -202,7 +203,8 @@ impl FromYaml for LoadPatternPreProcessed {
     }
 }
 
-#[cfg_attr(debug_assertions, derive(Debug, PartialEq))]
+#[cfg_attr(debug_assertions, derive(PartialEq))]
+#[derive(Debug)]
 struct LinearBuilderPreProcessed {
     from: Option<PrePercent>,
     to: PrePercent,
@@ -242,14 +244,17 @@ impl FromYaml for LinearBuilderPreProcessed {
                 YamlEvent::Scalar(s, ..) => match s.as_str() {
                     "from" => {
                         let c = FromYaml::parse_into(decoder)?;
+                        log::debug!("LinearBuilderPreProcessed.parse from: {:?}", c);
                         from = Some(c);
                     }
                     "to" => {
                         let a = FromYaml::parse_into(decoder)?;
+                        log::debug!("LinearBuilderPreProcessed.parse to: {:?}", a);
                         to = Some(a);
                     }
                     "over" => {
                         let b = FromYaml::parse_into(decoder)?;
+                        log::debug!("LinearBuilderPreProcessed.parse over: {:?}", b);
                         over = Some(b);
                     }
                     _ => return Err(Error::UnrecognizedKey(s, None, marker)),
@@ -257,8 +262,8 @@ impl FromYaml for LinearBuilderPreProcessed {
             }
         }
         let marker = first_marker.expect("should have a marker");
-        let to = to.ok_or_else(|| Error::MissingYamlField("to", marker))?;
-        let over = over.ok_or_else(|| Error::MissingYamlField("over", marker))?;
+        let to = to.ok_or(Error::MissingYamlField("to", marker))?;
+        let over = over.ok_or(Error::MissingYamlField("over", marker))?;
         let ret = Self { from, to, over };
         Ok((ret, marker))
     }
@@ -283,20 +288,21 @@ impl LoadPattern {
     }
 }
 
-#[cfg_attr(debug_assertions, derive(Debug))]
-#[derive(Clone, PartialEq)]
-pub struct ExplicitStaticList {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListWithOptions {
     pub random: bool,
     pub repeat: bool,
     pub values: Vec<json::Value>,
+    pub unique: bool,
 }
 
-impl FromYaml for ExplicitStaticList {
+impl FromYaml for ListWithOptions {
     fn parse<I: Iterator<Item = char>>(decoder: &mut YamlDecoder<I>) -> ParseResult<Self> {
         let mut saw_opening = false;
         let mut random = false;
         let mut repeat = true;
         let mut values = None;
+        let mut unique = false;
         let mut first_marker = None;
         loop {
             let (event, marker) = decoder.next()?;
@@ -324,52 +330,69 @@ impl FromYaml for ExplicitStaticList {
                     "random" => {
                         let (r, _): (bool, _) =
                             FromYaml::parse(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        log::debug!("ListWithOptions.parse random: {:?}", r);
                         random = r;
                     }
                     "repeat" => {
                         let (r, _) =
                             FromYaml::parse(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        log::debug!("ListWithOptions.parse repeat: {:?}", r);
                         repeat = r;
                     }
                     "values" => {
                         let (v, _) =
                             FromYaml::parse(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        log::debug!("ListWithOptions.parse values: {:?}", v);
                         values = Some(v);
+                    }
+                    "unique" => {
+                        let (u, _) =
+                            FromYaml::parse(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        log::debug!("ListWithOptions.parse unique: {:?}", u);
+                        unique = u;
                     }
                     _ => return Err(Error::UnrecognizedKey(s, None, marker)),
                 },
             }
         }
         let marker = first_marker.expect("should have a marker");
-        let values = values.ok_or_else(|| Error::MissingYamlField("values", marker))?;
+        let values = values.ok_or(Error::MissingYamlField("values", marker))?;
         let ret = Self {
             random,
             repeat,
             values,
+            unique,
         };
         Ok((ret, marker))
     }
 }
 
-#[cfg_attr(debug_assertions, derive(Debug))]
-#[derive(Clone, PartialEq)]
-pub enum StaticList {
-    Explicit(ExplicitStaticList),
-    Implicit(Vec<json::Value>),
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ListProvider {
+    WithOptions(ListWithOptions),
+    DefaultOptions(Vec<json::Value>),
 }
 
-impl FromYaml for StaticList {
+impl ListProvider {
+    pub fn unique(&self) -> bool {
+        matches!(self, ListProvider::WithOptions(l) if l.unique)
+    }
+}
+
+impl FromYaml for ListProvider {
     fn parse<I: Iterator<Item = char>>(decoder: &mut YamlDecoder<I>) -> ParseResult<Self> {
         let (event, marker) = decoder.peek()?;
         match event {
             YamlEvent::SequenceStart => {
                 let (e, marker) = FromYaml::parse(decoder)?;
-                let value = (StaticList::Implicit(e), marker);
+                log::debug!("ListProvider.parse SequenceStart: {:?}", e);
+                let value = (ListProvider::DefaultOptions(e), marker);
                 Ok(value)
             }
             YamlEvent::MappingStart => {
                 let (i, marker) = FromYaml::parse(decoder)?;
-                let value = (StaticList::Explicit(i), marker);
+                log::debug!("ListProvider.parse MappingStart: {:?}", i);
+                let value = (ListProvider::WithOptions(i), marker);
                 Ok(value)
             }
             _ => Err(Error::YamlDeserialize(None, *marker)),
@@ -377,31 +400,31 @@ impl FromYaml for StaticList {
     }
 }
 
-impl From<Vec<json::Value>> for StaticList {
+impl From<Vec<json::Value>> for ListProvider {
     fn from(v: Vec<json::Value>) -> Self {
-        StaticList::Implicit(v)
+        ListProvider::DefaultOptions(v)
     }
 }
 
-impl From<ExplicitStaticList> for StaticList {
-    fn from(e: ExplicitStaticList) -> Self {
-        StaticList::Explicit(e)
+impl From<ListWithOptions> for ListProvider {
+    fn from(e: ListWithOptions) -> Self {
+        ListProvider::WithOptions(e)
     }
 }
 
-impl IntoIterator for StaticList {
+impl IntoIterator for ListProvider {
     type Item = json::Value;
     type IntoIter = Either3<
-        StaticListRepeatRandomIterator,
+        ListRepeatRandomIterator,
         std::vec::IntoIter<json::Value>,
         std::iter::Cycle<std::vec::IntoIter<json::Value>>,
     >;
 
     fn into_iter(self) -> Self::IntoIter {
         match self {
-            StaticList::Explicit(mut e) => match (e.repeat, e.random) {
+            ListProvider::WithOptions(mut e) => match (e.repeat, e.random) {
                 (true, true) => {
-                    let a = StaticListRepeatRandomIterator {
+                    let a = ListRepeatRandomIterator {
                         random: Uniform::new(0, e.values.len()),
                         values: e.values,
                     };
@@ -415,17 +438,17 @@ impl IntoIterator for StaticList {
                 }
                 (true, false) => Either3::C(e.values.into_iter().cycle()),
             },
-            StaticList::Implicit(v) => Either3::C(v.into_iter().cycle()),
+            ListProvider::DefaultOptions(v) => Either3::C(v.into_iter().cycle()),
         }
     }
 }
 
-pub struct StaticListRepeatRandomIterator {
+pub struct ListRepeatRandomIterator {
     values: Vec<json::Value>,
     random: Uniform<usize>,
 }
 
-impl Iterator for StaticListRepeatRandomIterator {
+impl Iterator for ListRepeatRandomIterator {
     type Item = json::Value;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -434,12 +457,13 @@ impl Iterator for StaticListRepeatRandomIterator {
     }
 }
 
-#[cfg_attr(debug_assertions, derive(Debug, PartialEq))]
+#[cfg_attr(debug_assertions, derive(PartialEq))]
+#[derive(Debug)]
 enum ProviderPreProcessed {
     File(FileProviderPreProcessed),
     Range(RangeProviderPreProcessed),
     Response(ResponseProvider),
-    List(StaticList),
+    List(ListProvider),
 }
 
 #[derive(Clone, PartialEq)]
@@ -447,7 +471,7 @@ pub enum Provider {
     File(FileProvider),
     Range(RangeProvider),
     Response(ResponseProvider),
-    List(StaticList),
+    List(ListProvider),
 }
 
 impl FromYaml for ProviderPreProcessed {
@@ -480,21 +504,25 @@ impl FromYaml for ProviderPreProcessed {
                     "file" => {
                         let (c, marker) =
                             FromYaml::parse(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        log::debug!("ProviderPreProcessed.parse file: {:?}", c);
                         break (ProviderPreProcessed::File(c), marker);
                     }
                     "range" => {
                         let (c, marker) =
                             FromYaml::parse(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        log::debug!("ProviderPreProcessed.parse range: {:?}", c);
                         break (ProviderPreProcessed::Range(c), marker);
                     }
                     "response" => {
                         let (c, marker) =
                             FromYaml::parse(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        log::debug!("ProviderPreProcessed.parse response: {:?}", c);
                         break (ProviderPreProcessed::Response(c), marker);
                     }
                     "list" => {
                         let (c, marker) =
                             FromYaml::parse(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        log::debug!("ProviderPreProcessed.parse list: {:?}", c);
                         break (ProviderPreProcessed::List(c), marker);
                     }
                     _ => return Err(Error::UnrecognizedKey(s, None, marker)),
@@ -524,6 +552,12 @@ pub struct RangeProvider(
     RangeProviderPreProcessed,
 );
 
+impl RangeProvider {
+    pub fn unique(&self) -> bool {
+        self.1.unique
+    }
+}
+
 impl PartialEq for RangeProvider {
     fn eq(&self, rhs: &Self) -> bool {
         self.1 == rhs.1
@@ -545,13 +579,19 @@ impl From<RangeProviderPreProcessed> for RangeProvider {
     }
 }
 
-#[cfg_attr(debug_assertions, derive(Debug))]
-#[derive(Clone, PartialEq)]
+impl fmt::Display for RangeProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", serde_json::to_string(&self.1).unwrap_or_default())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct RangeProviderPreProcessed {
     start: i64,
     end: i64,
     step: NonZeroU16,
     repeat: bool,
+    unique: bool,
 }
 
 impl FromYaml for RangeProviderPreProcessed {
@@ -562,6 +602,7 @@ impl FromYaml for RangeProviderPreProcessed {
         let mut end = std::i64::MAX;
         let mut step = NonZeroU16::new(1).expect("1 is non-zero");
         let mut repeat = false;
+        let mut unique = false;
 
         let mut first_marker = None;
         loop {
@@ -607,6 +648,11 @@ impl FromYaml for RangeProviderPreProcessed {
                             FromYaml::parse(decoder).map_err(map_yaml_deserialize_err(s))?;
                         repeat = r;
                     }
+                    "unique" => {
+                        let (u, _) =
+                            FromYaml::parse(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        unique = u;
+                    }
                     _ => return Err(Error::UnrecognizedKey(s, None, marker)),
                 },
             }
@@ -617,16 +663,17 @@ impl FromYaml for RangeProviderPreProcessed {
             end,
             step,
             repeat,
+            unique,
         };
         Ok((ret, marker))
     }
 }
 
-#[cfg_attr(debug_assertions, derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum FileFormat {
     Csv,
     Json,
+    #[default]
     Line,
 }
 
@@ -643,14 +690,7 @@ impl FromYaml for FileFormat {
     }
 }
 
-impl Default for FileFormat {
-    fn default() -> Self {
-        FileFormat::Line
-    }
-}
-
-#[cfg_attr(debug_assertions, derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CsvHeader {
     Bool(bool),
     String(String),
@@ -687,8 +727,7 @@ fn from_yaml_char_u8<I: Iterator<Item = char>>(decoder: &mut YamlDecoder<I>) -> 
     }
 }
 
-#[cfg_attr(debug_assertions, derive(Debug))]
-#[derive(Clone, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CsvSettings {
     pub comment: Option<u8>,
     pub delimiter: Option<u8>,
@@ -783,7 +822,8 @@ impl FromYaml for CsvSettings {
     }
 }
 
-#[cfg_attr(debug_assertions, derive(Debug, PartialEq))]
+#[cfg_attr(debug_assertions, derive(PartialEq))]
+#[derive(Debug)]
 struct FileProviderPreProcessed {
     csv: CsvSettings,
     auto_return: Option<EndpointProvidesSendOptions>,
@@ -793,6 +833,7 @@ struct FileProviderPreProcessed {
     path: PreTemplate,
     random: bool,
     repeat: bool,
+    unique: bool,
 }
 
 impl FromYaml for FileProviderPreProcessed {
@@ -804,6 +845,7 @@ impl FromYaml for FileProviderPreProcessed {
         let mut path = None;
         let mut random = false;
         let mut repeat = false;
+        let mut unique = false;
 
         let mut first_marker = None;
         let mut saw_opening = false;
@@ -866,6 +908,11 @@ impl FromYaml for FileProviderPreProcessed {
                             FromYaml::parse(decoder).map_err(map_yaml_deserialize_err(s))?;
                         repeat = r;
                     }
+                    "unique" => {
+                        let (u, _) =
+                            FromYaml::parse(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        unique = u;
+                    }
                     _ => return Err(Error::UnrecognizedKey(s, None, marker)),
                 },
             }
@@ -874,7 +921,7 @@ impl FromYaml for FileProviderPreProcessed {
         let csv = csv.unwrap_or_default();
         let buffer = buffer.unwrap_or_default();
         let format = format.unwrap_or_default();
-        let path = path.ok_or_else(|| Error::MissingYamlField("path", marker))?;
+        let path = path.ok_or(Error::MissingYamlField("path", marker))?;
         let ret = Self {
             csv,
             auto_return,
@@ -883,22 +930,24 @@ impl FromYaml for FileProviderPreProcessed {
             path,
             random,
             repeat,
+            unique,
         };
         Ok((ret, marker))
     }
 }
 
-#[cfg_attr(debug_assertions, derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ResponseProvider {
     pub auto_return: Option<EndpointProvidesSendOptions>,
     pub buffer: Limit,
+    pub unique: bool,
 }
 
 impl FromYaml for ResponseProvider {
     fn parse<I: Iterator<Item = char>>(decoder: &mut YamlDecoder<I>) -> ParseResult<Self> {
         let mut auto_return = None;
         let mut buffer = None;
+        let mut unique = false;
 
         let mut first_marker = None;
         let mut saw_opening = false;
@@ -935,6 +984,11 @@ impl FromYaml for ResponseProvider {
                             FromYaml::parse_into(decoder).map_err(map_yaml_deserialize_err(s))?;
                         buffer = Some(a);
                     }
+                    "unique" => {
+                        let u =
+                            FromYaml::parse_into(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        unique = u;
+                    }
                     _ => return Err(Error::UnrecognizedKey(s, None, marker)),
                 },
             }
@@ -944,12 +998,14 @@ impl FromYaml for ResponseProvider {
         let ret = Self {
             auto_return,
             buffer,
+            unique,
         };
         Ok((ret, marker))
     }
 }
 
-#[cfg_attr(debug_assertions, derive(Debug, PartialEq))]
+#[cfg_attr(debug_assertions, derive(PartialEq))]
+#[derive(Debug)]
 pub struct LoggerPreProcessed {
     select: Option<WithMarker<json::Value>>,
     for_each: Vec<WithMarker<String>>,
@@ -1016,36 +1072,43 @@ impl FromYaml for LoggerPreProcessed {
                     "select" => {
                         let c =
                             FromYaml::parse_into(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        log::debug!("LoggerPreProcessed.parse select: {:?}", c);
                         select = Some(c);
                     }
                     "for_each" => {
                         let a =
                             FromYaml::parse_into(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        log::debug!("LoggerPreProcessed.parse for_each: {:?}", a);
                         for_each = Some(a);
                     }
                     "where" => {
                         let b =
                             FromYaml::parse_into(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        log::debug!("LoggerPreProcessed.parse where: {:?}", b);
                         where_clause = Some(b);
                     }
                     "to" => {
                         let b =
                             FromYaml::parse_into(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        log::debug!("LoggerPreProcessed.parse to: {:?}", b);
                         to = Some(b);
                     }
                     "pretty" => {
                         let b =
                             FromYaml::parse_into(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        log::debug!("LoggerPreProcessed.parse pretty: {:?}", b);
                         pretty = b;
                     }
                     "limit" => {
                         let b =
                             FromYaml::parse_into(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        log::debug!("LoggerPreProcessed.parse limit: {:?}", b);
                         limit = Some(b);
                     }
                     "kill" => {
                         let b =
                             FromYaml::parse_into(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        log::debug!("LoggerPreProcessed.parse kill: {:?}", b);
                         kill = b;
                     }
                     _ => return Err(Error::UnrecognizedKey(s, None, marker)),
@@ -1053,7 +1116,7 @@ impl FromYaml for LoggerPreProcessed {
             }
         }
         let marker = first_marker.expect("should have a marker");
-        let to = to.ok_or_else(|| Error::MissingYamlField("to", marker))?;
+        let to = to.ok_or(Error::MissingYamlField("to", marker))?;
         let for_each = for_each.unwrap_or_default();
         let ret = Self {
             select,
@@ -1068,7 +1131,8 @@ impl FromYaml for LoggerPreProcessed {
     }
 }
 
-#[cfg_attr(debug_assertions, derive(Debug, PartialEq))]
+#[cfg_attr(debug_assertions, derive(PartialEq))]
+#[derive(Debug)]
 struct LogsPreProcessed {
     select: WithMarker<json::Value>,
     for_each: Vec<WithMarker<String>>,
@@ -1125,7 +1189,7 @@ impl FromYaml for LogsPreProcessed {
             }
         }
         let marker = first_marker.expect("should have a marker");
-        let select = select.ok_or_else(|| Error::MissingYamlField("select", marker))?;
+        let select = select.ok_or(Error::MissingYamlField("select", marker))?;
         let for_each = for_each.unwrap_or_default();
         let ret = Self {
             select,
@@ -1136,7 +1200,7 @@ impl FromYaml for LogsPreProcessed {
     }
 }
 
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 struct EndpointPreProcessed {
     declare: BTreeMap<String, PreValueOrExpression>,
     headers: TupleVec<String, Nullable<PreTemplate>>,
@@ -1220,72 +1284,86 @@ impl FromYaml for EndpointPreProcessed {
                     "declare" => {
                         let c =
                             FromYaml::parse_into(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        log::debug!("EndpointPreProcessed.parse declare: {:?}", c);
                         declare = Some(c);
                     }
                     "headers" => {
                         let a =
                             FromYaml::parse_into(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        log::debug!("EndpointPreProcessed.parse headers: {:?}", a);
                         headers = Some(a);
                     }
                     "body" => {
                         let a =
                             FromYaml::parse_into(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        log::debug!("EndpointPreProcessed.parse body: {:?}", a);
                         body = Some(a);
                     }
                     "load_pattern" => {
                         let a =
                             FromYaml::parse_into(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        log::debug!("EndpointPreProcessed.parse load_pattern: {:?}", a);
                         load_pattern = Some(a);
                     }
                     "method" => {
                         let a =
                             FromYaml::parse_into(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        log::debug!("EndpointPreProcessed.parse method: {:?}", a);
                         method = Some(a);
                     }
                     "on_demand" => {
                         let a =
                             FromYaml::parse_into(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        log::debug!("EndpointPreProcessed.parse on_demand: {:?}", a);
                         on_demand = Some(a);
                     }
                     "peak_load" => {
                         let p =
                             FromYaml::parse_into(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        log::debug!("EndpointPreProcessed.parse peak_load: {:?}", p);
                         let p = PreHitsPer(p);
                         peak_load = Some(p);
                     }
                     "tags" => {
                         let a =
                             FromYaml::parse_into(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        log::debug!("EndpointPreProcessed.parse tags: {:?}", a);
                         tags = Some(a);
                     }
                     "url" => {
                         let v =
                             FromYaml::parse_into(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        log::debug!("EndpointPreProcessed.parse url: {:?}", v);
                         url = Some(v);
                     }
                     "provides" => {
                         let a =
                             FromYaml::parse_into(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        log::debug!("EndpointPreProcessed.parse provides: {:?}", a);
                         provides = Some(a);
                     }
                     "logs" => {
                         let a =
                             FromYaml::parse_into(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        log::debug!("EndpointPreProcessed.parse logs: {:?}", a);
                         logs = Some(a);
                     }
                     "max_parallel_requests" => {
                         let a =
                             FromYaml::parse_into(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        log::debug!("EndpointPreProcessed.parse max_parallel_requests: {:?}", a);
                         max_parallel_requests = Some(a);
                     }
                     "no_auto_returns" => {
                         let a =
                             FromYaml::parse_into(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        log::debug!("EndpointPreProcessed.parse no_auto_returns: {:?}", a);
                         no_auto_returns = Some(a);
                     }
                     "request_timeout" => {
                         let a =
                             FromYaml::parse_into(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        log::debug!("EndpointPreProcessed.parse request_timeout: {:?}", a);
                         request_timeout = Some(a);
                     }
                     _ => return Err(Error::UnrecognizedKey(s, None, marker)),
@@ -1298,7 +1376,7 @@ impl FromYaml for EndpointPreProcessed {
         let method = method.unwrap_or_default();
         let on_demand = on_demand.unwrap_or_default();
         let tags = tags.unwrap_or_default();
-        let url = url.ok_or_else(|| Error::MissingYamlField("url", marker))?;
+        let url = url.ok_or(Error::MissingYamlField("url", marker))?;
         let provides = provides.unwrap_or_default();
         let logs = logs.unwrap_or_default();
         let no_auto_returns = no_auto_returns.unwrap_or_default();
@@ -1323,7 +1401,8 @@ impl FromYaml for EndpointPreProcessed {
     }
 }
 
-#[cfg_attr(debug_assertions, derive(Debug, PartialEq))]
+#[cfg_attr(debug_assertions, derive(PartialEq))]
+#[derive(Debug)]
 enum Body {
     String(PreTemplate),
     File(PreTemplate),
@@ -1377,7 +1456,8 @@ impl FromYaml for Body {
     }
 }
 
-#[cfg_attr(debug_assertions, derive(Debug, PartialEq))]
+#[cfg_attr(debug_assertions, derive(PartialEq))]
+#[derive(Debug)]
 struct BodyMultipartPiece {
     pub headers: TupleVec<String, PreTemplate>,
     pub body: BodyMultipartPieceBody,
@@ -1429,13 +1509,14 @@ impl FromYaml for BodyMultipartPiece {
         }
         let marker = first_marker.expect("should have a marker");
         let headers = headers.unwrap_or_default();
-        let body = body.ok_or_else(|| Error::MissingYamlField("body", marker))?;
+        let body = body.ok_or(Error::MissingYamlField("body", marker))?;
         let ret = Self { headers, body };
         Ok((ret, marker))
     }
 }
 
-#[cfg_attr(debug_assertions, derive(Debug, PartialEq))]
+#[cfg_attr(debug_assertions, derive(PartialEq))]
+#[derive(Debug)]
 enum BodyMultipartPieceBody {
     String(PreTemplate),
     File(PreTemplate),
@@ -1479,9 +1560,9 @@ impl FromYaml for BodyMultipartPieceBody {
     }
 }
 
-#[cfg_attr(debug_assertions, derive(Debug))]
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum EndpointProvidesSendOptions {
+    #[default]
     Block,
     Force,
     IfNotFull,
@@ -1490,12 +1571,6 @@ pub enum EndpointProvidesSendOptions {
 impl EndpointProvidesSendOptions {
     pub fn is_block(self) -> bool {
         matches!(self, EndpointProvidesSendOptions::Block)
-    }
-}
-
-impl Default for EndpointProvidesSendOptions {
-    fn default() -> Self {
-        EndpointProvidesSendOptions::Block
     }
 }
 
@@ -1516,11 +1591,12 @@ impl FromYaml for EndpointProvidesSendOptions {
     }
 }
 
-#[cfg_attr(debug_assertions, derive(Debug, PartialEq))]
+#[cfg_attr(debug_assertions, derive(PartialEq))]
+#[derive(Debug)]
 pub(crate) struct EndpointProvidesPreProcessed {
-    send: Option<EndpointProvidesSendOptions>,
-    select: WithMarker<json::Value>,
     for_each: Vec<WithMarker<String>>,
+    select: WithMarker<json::Value>,
+    send: Option<EndpointProvidesSendOptions>,
     where_clause: Option<WithMarker<String>>,
 }
 
@@ -1580,12 +1656,12 @@ impl FromYaml for EndpointProvidesPreProcessed {
             }
         }
         let marker = first_marker.expect("should have a marker");
-        let select = select.ok_or_else(|| Error::MissingYamlField("select", marker))?;
+        let select = select.ok_or(Error::MissingYamlField("select", marker))?;
         let for_each = for_each.unwrap_or_default();
         let ret = Self {
-            send,
-            select,
             for_each,
+            select,
+            send,
             where_clause,
         };
         Ok((ret, marker))
@@ -1604,15 +1680,20 @@ fn default_bucket_size(marker: Marker) -> PreDuration {
     PreDuration(PreTemplate::new(WithMarker::new("60s".into(), marker)))
 }
 
+fn default_log_provider_stats() -> bool {
+    true
+}
+
 pub fn default_auto_buffer_start_size() -> usize {
     5
 }
 
-#[cfg_attr(debug_assertions, derive(Debug, PartialEq))]
+#[cfg_attr(debug_assertions, derive(PartialEq))]
+#[derive(Debug)]
 struct ClientConfigPreProcessed {
-    request_timeout: PreDuration,
     headers: TupleVec<String, PreTemplate>,
     keepalive: PreDuration,
+    request_timeout: PreDuration,
 }
 
 impl FromYaml for ClientConfigPreProcessed {
@@ -1670,9 +1751,9 @@ impl FromYaml for ClientConfigPreProcessed {
         let keepalive = keepalive.unwrap_or_else(|| default_keepalive(marker));
         let headers = headers.unwrap_or_default();
         let ret = Self {
-            request_timeout,
-            keepalive,
             headers,
+            keepalive,
+            request_timeout,
         };
         Ok((ret, marker))
     }
@@ -1696,16 +1777,19 @@ impl DefaultWithMarker for ClientConfigPreProcessed {
 pub struct GeneralConfig {
     pub auto_buffer_start_size: usize,
     pub bucket_size: Duration,
-    pub log_provider_stats: Option<Duration>,
+    pub log_provider_stats: bool,
     pub watch_transition_time: Option<Duration>,
+    pub log_level: Option<LevelFilter>,
 }
 
-#[cfg_attr(debug_assertions, derive(Debug, PartialEq))]
+#[cfg_attr(debug_assertions, derive(PartialEq))]
+#[derive(Debug)]
 struct GeneralConfigPreProcessed {
     auto_buffer_start_size: usize,
     bucket_size: PreDuration,
-    log_provider_stats: Option<PreDuration>,
+    log_provider_stats: bool,
     watch_transition_time: Option<PreDuration>,
+    pub log_level: Option<LevelFilter>,
 }
 
 impl DefaultWithMarker for GeneralConfigPreProcessed {
@@ -1713,8 +1797,9 @@ impl DefaultWithMarker for GeneralConfigPreProcessed {
         GeneralConfigPreProcessed {
             auto_buffer_start_size: default_auto_buffer_start_size(),
             bucket_size: default_bucket_size(marker),
-            log_provider_stats: None,
+            log_provider_stats: default_log_provider_stats(),
             watch_transition_time: None,
+            log_level: None,
         }
     }
 }
@@ -1723,8 +1808,9 @@ impl FromYaml for GeneralConfigPreProcessed {
     fn parse<I: Iterator<Item = char>>(decoder: &mut YamlDecoder<I>) -> ParseResult<Self> {
         let mut auto_buffer_start_size = default_auto_buffer_start_size();
         let mut bucket_size = None;
-        let mut log_provider_stats = None;
+        let mut log_provider_stats = default_log_provider_stats();
         let mut watch_transition_time = None;
+        let mut log_level = None;
 
         let mut first_marker = None;
         let mut saw_opening = false;
@@ -1750,29 +1836,61 @@ impl FromYaml for GeneralConfigPreProcessed {
                 YamlEvent::SequenceEnd => {
                     unreachable!("shouldn't see sequence end");
                 }
-                YamlEvent::Scalar(s, ..) => match s.as_str() {
-                    "auto_buffer_start_size" => {
-                        let c =
-                            FromYaml::parse_into(decoder).map_err(map_yaml_deserialize_err(s))?;
-                        auto_buffer_start_size = c;
+                YamlEvent::Scalar(s, ..) => {
+                    match s.as_str() {
+                        "auto_buffer_start_size" => {
+                            let c = FromYaml::parse_into(decoder)
+                                .map_err(map_yaml_deserialize_err(s))?;
+                            auto_buffer_start_size = c;
+                        }
+                        "bucket_size" => {
+                            let a = FromYaml::parse_into(decoder)
+                                .map_err(map_yaml_deserialize_err(s))?;
+                            bucket_size = Some(a);
+                        }
+                        "log_provider_stats" => {
+                            // We can't parse directly to a bool to allow for backwards compitibility with the old duration
+                            let d: String = FromYaml::parse_into(decoder)
+                                .map_err(map_yaml_deserialize_err(s.clone()))?;
+                            debug!("log_provider_stats: {}", d);
+                            // Check for 'true' or 'false' and change to false
+                            log_provider_stats = match d.parse::<bool>() {
+                                Ok(value) => value,
+                                Err(bool_err) => {
+                                    debug!("log_provider_stats error {}/{}: {}", s, d, bool_err);
+                                    // Historically, log_provider_stats was an optional duration. However, even though the docs said that it
+                                    // was used to determine when provider stats were logged, it actually output at the rate of bucket_size regardless.
+                                    // Going forward it is on by default, we only want to allow turning it off via "false".
+                                    // 'durations' are the equivalent of "true" and the duration is ignored. Anything else should error.
+                                    duration_from_string(d.clone()).map_err(|err| {
+                                        error!("log_provider_stats error {}/{}: {}", s, d, bool_err);
+                                        debug!("log_provider_stats duration_from_string error {}/{}: {}", s, d, err);
+                                        // We don't want to return a duration error, we want to just say there was a problem with the "name"
+                                        Error::YamlDeserialize(Some(s), marker)
+                                    })?;
+                                    true
+                                }
+                            };
+                        }
+                        "watch_transition_time" => {
+                            let b = FromYaml::parse_into(decoder)
+                                .map_err(map_yaml_deserialize_err(s))?;
+                            watch_transition_time = Some(b);
+                        }
+                        "log_level" => {
+                            let d: String = FromYaml::parse_into(decoder)
+                                .map_err(map_yaml_deserialize_err(s.clone()))?;
+                            debug!("log_level string: {}", d);
+                            let level = LevelFilter::from_str(&d).map_err(|err| {
+                                error!("Could not parse LevelFilter from {}/{}: {}", s, d, err);
+                                Error::YamlDeserialize(Some(s), marker)
+                            })?;
+                            debug!("log_level: {}", level);
+                            log_level = Some(level);
+                        }
+                        _ => return Err(Error::UnrecognizedKey(s, None, marker)),
                     }
-                    "bucket_size" => {
-                        let a =
-                            FromYaml::parse_into(decoder).map_err(map_yaml_deserialize_err(s))?;
-                        bucket_size = Some(a);
-                    }
-                    "log_provider_stats" => {
-                        let b =
-                            FromYaml::parse_into(decoder).map_err(map_yaml_deserialize_err(s))?;
-                        log_provider_stats = Some(b);
-                    }
-                    "watch_transition_time" => {
-                        let b =
-                            FromYaml::parse_into(decoder).map_err(map_yaml_deserialize_err(s))?;
-                        watch_transition_time = Some(b);
-                    }
-                    _ => return Err(Error::UnrecognizedKey(s, None, marker)),
-                },
+                }
             }
         }
         let marker = first_marker.expect("should have a marker");
@@ -1782,12 +1900,14 @@ impl FromYaml for GeneralConfigPreProcessed {
             bucket_size,
             log_provider_stats,
             watch_transition_time,
+            log_level,
         };
         Ok((ret, marker))
     }
 }
 
-#[cfg_attr(debug_assertions, derive(Debug, PartialEq))]
+#[cfg_attr(debug_assertions, derive(PartialEq))]
+#[derive(Debug)]
 pub struct ConfigPreProcessed {
     client: ClientConfigPreProcessed,
     general: GeneralConfigPreProcessed,
@@ -1835,11 +1955,13 @@ impl FromYaml for ConfigPreProcessed {
                     "client" => {
                         let (c, _) =
                             FromYaml::parse(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        log::debug!("ConfigPreProcessed.parse client: {:?}", c);
                         client = Some(c);
                     }
                     "general" => {
                         let (a, _) =
                             FromYaml::parse(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        log::debug!("ConfigPreProcessed.parse general: {:?}", a);
                         general = Some(a);
                     }
                     _ => return Err(Error::UnrecognizedKey(s, None, marker)),
@@ -1854,7 +1976,8 @@ impl FromYaml for ConfigPreProcessed {
     }
 }
 
-#[cfg_attr(debug_assertions, derive(Debug, PartialEq))]
+#[cfg_attr(debug_assertions, derive(PartialEq))]
+#[derive(Debug)]
 struct LoadTestPreProcessed {
     config: ConfigPreProcessed,
     endpoints: Vec<EndpointPreProcessed>,
@@ -1865,6 +1988,7 @@ struct LoadTestPreProcessed {
 }
 
 impl FromYaml for LoadTestPreProcessed {
+    // Entry point for parsing the yaml file
     fn parse<I: Iterator<Item = char>>(decoder: &mut YamlDecoder<I>) -> ParseResult<Self> {
         let mut config = None;
         let mut endpoints = None;
@@ -1900,31 +2024,37 @@ impl FromYaml for LoadTestPreProcessed {
                     "config" => {
                         let r =
                             FromYaml::parse_into(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        log::debug!("LoadTestPreProcessed.parse config: {:?}", r);
                         config = Some(r);
                     }
                     "endpoints" => {
                         let r =
                             FromYaml::parse_into(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        log::debug!("LoadTestPreProcessed.parse endpoints: {:?}", r);
                         endpoints = Some(r);
                     }
                     "load_pattern" => {
                         let v =
                             FromYaml::parse_into(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        log::debug!("LoadTestPreProcessed.parse load_pattern: {:?}", v);
                         load_pattern = Some(v);
                     }
                     "providers" => {
                         let v =
                             FromYaml::parse_into(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        log::debug!("LoadTestPreProcessed.parse providers: {:?}", v);
                         providers = Some(v);
                     }
                     "loggers" => {
                         let v =
                             FromYaml::parse_into(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        log::debug!("LoadTestPreProcessed.parse loggers: {:?}", v);
                         loggers = Some(v);
                     }
                     "vars" => {
                         let v =
                             FromYaml::parse_into(decoder).map_err(map_yaml_deserialize_err(s))?;
+                        log::debug!("LoadTestPreProcessed.parse vars: {:?}", v);
                         vars = Some(v);
                     }
                     _ => return Err(Error::UnrecognizedKey(s, None, marker)),
@@ -1933,7 +2063,7 @@ impl FromYaml for LoadTestPreProcessed {
         }
         let marker = first_marker.expect("should have a marker");
         let config = config.unwrap_or_else(|| DefaultWithMarker::default(marker));
-        let endpoints = endpoints.ok_or_else(|| Error::MissingYamlField("endpoints", marker))?;
+        let endpoints = endpoints.ok_or(Error::MissingYamlField("endpoints", marker))?;
         let providers = providers.unwrap_or_default();
         let loggers = loggers.unwrap_or_default();
         let vars = vars.unwrap_or_default();
@@ -1949,7 +2079,7 @@ impl FromYaml for LoadTestPreProcessed {
     }
 }
 
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 struct WithMarker<T> {
     inner: T,
     marker: Marker,
@@ -1987,7 +2117,8 @@ impl<T: FromYaml> FromYaml for WithMarker<T> {
     }
 }
 
-#[cfg_attr(debug_assertions, derive(Debug, PartialEq))]
+#[cfg_attr(debug_assertions, derive(PartialEq))]
+#[derive(Debug)]
 struct PreValueOrExpression(WithMarker<String>);
 
 impl PreValueOrExpression {
@@ -2014,7 +2145,8 @@ impl FromYaml for PreValueOrExpression {
     }
 }
 
-#[cfg_attr(debug_assertions, derive(Debug, PartialEq))]
+#[cfg_attr(debug_assertions, derive(PartialEq))]
+#[derive(Debug)]
 struct PreTemplate(WithMarker<String>, bool);
 
 impl PreTemplate {
@@ -2061,7 +2193,8 @@ impl FromYaml for PreTemplate {
     }
 }
 
-#[cfg_attr(debug_assertions, derive(Debug, PartialEq))]
+#[cfg_attr(debug_assertions, derive(PartialEq))]
+#[derive(Debug)]
 pub struct PreVar(WithMarker<json::Value>);
 
 impl PreVar {
@@ -2082,7 +2215,7 @@ impl PreVar {
                         }
                         Err(e) => return Err(e.into()),
                     };
-                    *v = json::from_str(&s).unwrap_or_else(|_e| json::Value::String(s));
+                    *v = json::from_str(&s).unwrap_or(json::Value::String(s));
                 }
                 json::Value::Array(a) => {
                     for v in a.iter_mut() {
@@ -2122,8 +2255,7 @@ pub fn duration_from_string(dur: String) -> Result<Duration, Error> {
 
 fn duration_from_string2(dur: String, marker: Marker) -> Result<Duration, Error> {
     let base_re = r"(?i)(\d+)\s*(d|h|m|s|days?|hrs?|mins?|secs?|hours?|minutes?|seconds?)";
-    let sanity_re =
-        Regex::new(&format!(r"^(?:{}\s*)+$", base_re)).expect("should be a valid regex");
+    let sanity_re = Regex::new(&format!(r"^(?:{base_re}\s*)+$")).expect("should be a valid regex");
     if !sanity_re.is_match(&dur) {
         return Err(Error::InvalidDuration(dur, marker));
     }
@@ -2151,7 +2283,8 @@ fn duration_from_string2(dur: String, marker: Marker) -> Result<Duration, Error>
     Ok(Duration::from_secs(total_secs))
 }
 
-#[cfg_attr(debug_assertions, derive(Debug, PartialEq))]
+#[cfg_attr(debug_assertions, derive(PartialEq))]
+#[derive(Debug)]
 pub struct PreDuration(PreTemplate);
 
 impl PreDuration {
@@ -2170,7 +2303,8 @@ impl FromYaml for PreDuration {
     }
 }
 
-#[cfg_attr(debug_assertions, derive(Debug, PartialEq))]
+#[cfg_attr(debug_assertions, derive(PartialEq))]
+#[derive(Debug)]
 struct PrePercent(PreTemplate);
 
 impl PrePercent {
@@ -2200,7 +2334,7 @@ impl FromYaml for PrePercent {
     }
 }
 
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Debug)]
 struct PreLoadPattern(Vec<LoadPatternPreProcessed>, Marker);
 
 #[cfg(debug_assertions)]
@@ -2235,7 +2369,7 @@ impl PreLoadPattern {
             }
         }
         builder
-            .ok_or_else(|| Error::InvalidLoadPattern(self.1))
+            .ok_or(Error::InvalidLoadPattern(self.1))
             .map(LoadPattern::Linear)
     }
 }
@@ -2247,7 +2381,8 @@ impl FromYaml for PreLoadPattern {
     }
 }
 
-#[cfg_attr(debug_assertions, derive(Debug, PartialEq))]
+#[cfg_attr(debug_assertions, derive(PartialEq))]
+#[derive(Debug)]
 struct PreHitsPer(PreTemplate);
 
 impl PreHitsPer {
@@ -2255,7 +2390,7 @@ impl PreHitsPer {
         let string = self
             .0
             .evaluate(static_vars, &mut RequiredProviders::new())?;
-        let re = Regex::new(r"^(?i)(\d+)\s*hp([ms])$").expect("should be a valid regex");
+        let re = Regex::new(r"^(?i)(\d+(?:\.\d+)?)\s*hp([ms])$").expect("should be a valid regex");
         let captures = re
             .captures(&string)
             .ok_or_else(|| Error::InvalidPeakLoad(string.clone(), (self.0).0.marker))?;
@@ -2274,6 +2409,7 @@ impl PreHitsPer {
         }
     }
 }
+
 pub struct Config {
     pub client: ClientConfig,
     pub general: GeneralConfig,
@@ -2298,13 +2434,21 @@ pub struct FileProvider {
     pub path: String,
     pub random: bool,
     pub repeat: bool,
+    pub unique: bool,
 }
 
+#[derive(Serialize)]
 pub struct Logger {
     pub to: String,
     pub pretty: bool,
     pub limit: Option<usize>,
     pub kill: bool,
+}
+
+impl fmt::Display for Logger {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", serde_json::to_string(&self).unwrap_or_default())
+    }
 }
 
 impl Logger {
@@ -2383,6 +2527,17 @@ pub enum BodyTemplate {
     String(Template),
 }
 
+impl fmt::Display for BodyTemplate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self {
+            BodyTemplate::File(_, _) => write!(f, "BodyTemplate::File"),
+            BodyTemplate::Multipart(_) => write!(f, "BodyTemplate::Multipart"),
+            BodyTemplate::None => write!(f, "BodyTemplate::None"),
+            BodyTemplate::String(_) => write!(f, "BodyTemplate::String"),
+        }
+    }
+}
+
 impl Endpoint {
     fn from_preprocessed(
         endpoint: EndpointPreProcessed,
@@ -2390,7 +2545,7 @@ impl Endpoint {
         static_vars: &BTreeMap<String, json::Value>,
         global_load_pattern: &Option<LoadPattern>,
         global_headers: &[(String, (Template, RequiredProviders))],
-        config_path: &PathBuf,
+        config_path: &Path,
     ) -> Result<Self, Error> {
         let EndpointPreProcessed {
             declare,
@@ -2474,7 +2629,7 @@ impl Endpoint {
             .into_iter()
             .map(|(key, mut value)| {
                 value.no_fail();
-                let value = value.as_template(&static_vars, &mut required_providers)?;
+                let value = value.as_template(static_vars, &mut required_providers)?;
                 Ok((key, value))
             })
             .collect::<Result<_, Error>>()?;
@@ -2484,7 +2639,7 @@ impl Endpoint {
                 let value = match body {
                     Body::File(body) => {
                         let template = body.as_template(static_vars, &mut required_providers)?;
-                        BodyTemplate::File(config_path.clone(), template)
+                        BodyTemplate::File(config_path.into(), template)
                     }
                     Body::String(body) => {
                         let template = body.as_template(static_vars, &mut required_providers)?;
@@ -2528,7 +2683,7 @@ impl Endpoint {
                             })
                             .collect::<Result<_, _>>()?;
                         let multipart = MultipartBody {
-                            path: config_path.clone(),
+                            path: config_path.into(),
                             pieces,
                         };
                         BodyTemplate::Multipart(multipart)
@@ -2615,9 +2770,13 @@ impl Endpoint {
 impl LoadTest {
     pub fn from_config(
         bytes: &[u8],
-        config_path: &PathBuf,
+        config_path: &Path,
         env_vars: &BTreeMap<String, String>,
     ) -> Result<Self, Error> {
+        debug!(
+            "config::LoadTest::from_config: {}",
+            config_path.to_str().unwrap_or_default()
+        );
         let iter = std::str::from_utf8(bytes).unwrap().chars();
 
         let mut decoder = YamlDecoder::new(iter);
@@ -2657,18 +2816,14 @@ impl LoadTest {
             general: GeneralConfig {
                 auto_buffer_start_size: c.config.general.auto_buffer_start_size,
                 bucket_size: c.config.general.bucket_size.evaluate(&vars)?,
-                log_provider_stats: c
-                    .config
-                    .general
-                    .log_provider_stats
-                    .map(|b| b.evaluate(&vars))
-                    .transpose()?,
+                log_provider_stats: c.config.general.log_provider_stats,
                 watch_transition_time: c
                     .config
                     .general
                     .watch_transition_time
                     .map(|b| b.evaluate(&vars))
                     .transpose()?,
+                log_level: c.config.general.log_level,
             },
         };
         let mut load_test_errors = Vec::new();
@@ -2726,6 +2881,7 @@ impl LoadTest {
                             path,
                             random,
                             repeat,
+                            unique,
                         } = f;
                         let path = path.evaluate(&vars, &mut RequiredProviders::new())?;
                         let f = FileProvider {
@@ -2736,6 +2892,7 @@ impl LoadTest {
                             path,
                             random,
                             repeat,
+                            unique,
                         };
                         Provider::File(f)
                     }
@@ -2884,8 +3041,8 @@ mod tests {
     fn from_yaml_limit() {
         let values = vec![
             ("asdf", None),
-            ("auto", Some(Limit::auto())),
-            ("96", Some(Limit::Integer(96))),
+            ("auto", Some(Limit::dynamic())),
+            ("96", Some(Limit::Static(96))),
             ("-96", None),
         ];
         check_all(values);
@@ -2904,16 +3061,17 @@ mod tests {
     }
 
     #[test]
-    fn from_yaml_static_list() {
+    fn from_yaml_list() {
         let values = vec![
             (
                 "values:
                     - foo
                     - bar",
-                Some(StaticList::Explicit(ExplicitStaticList {
+                Some(ListProvider::WithOptions(ListWithOptions {
                     random: false,
                     repeat: true,
                     values: vec![json::json!("foo"), json::json!("bar")],
+                    unique: false,
                 })),
             ),
             (
@@ -2923,17 +3081,33 @@ mod tests {
                 values:
                     - foo
                     - bar",
-                Some(StaticList::Explicit(ExplicitStaticList {
+                Some(ListProvider::WithOptions(ListWithOptions {
                     random: true,
                     repeat: false,
                     values: vec![json::json!("foo"), json::json!("bar")],
+                    unique: false,
+                })),
+            ),
+            (
+                "
+                repeat: false
+                random: true
+                unique: true
+                values:
+                    - foo
+                    - bar",
+                Some(ListProvider::WithOptions(ListWithOptions {
+                    random: true,
+                    repeat: false,
+                    values: vec![json::json!("foo"), json::json!("bar")],
+                    unique: true,
                 })),
             ),
             (
                 "
                 - foo
                 - bar",
-                Some(StaticList::Implicit(vec![
+                Some(ListProvider::DefaultOptions(vec![
                     json::json!("foo"),
                     json::json!("bar"),
                 ])),
@@ -3012,6 +3186,7 @@ mod tests {
                     path: create_template("foo.bar"),
                     random: false,
                     repeat: false,
+                    unique: false,
                 })),
             ),
             (
@@ -3021,6 +3196,7 @@ mod tests {
                     end: std::i64::MAX,
                     step: NonZeroU16::new(1).expect("1 is non-zero"),
                     repeat: false,
+                    unique: false,
                 })),
             ),
             (
@@ -3028,15 +3204,16 @@ mod tests {
                 Some(ProviderPreProcessed::Response(ResponseProvider {
                     auto_return: None,
                     buffer: Default::default(),
+                    unique: false,
                 })),
             ),
             (
                 "
                 list:
                     - 1",
-                Some(ProviderPreProcessed::List(StaticList::Implicit(vec![
-                    json::json!(1),
-                ]))),
+                Some(ProviderPreProcessed::List(ListProvider::DefaultOptions(
+                    vec![json::json!(1)],
+                ))),
             ),
         ];
         check_all(values);
@@ -3059,6 +3236,25 @@ mod tests {
             max_parallel_requests: None,
             request_timeout: None,
             marker: create_marker(),
+        }
+    }
+
+    #[test]
+    fn pre_hits_per_to_hits_per() {
+        let values = vec![
+            ("50 hpm", HitsPer::Minute(50.0)),
+            ("50hpm", HitsPer::Minute(50.0)),
+            ("51.7 hpm", HitsPer::Minute(51.7)),
+            ("500     hps", HitsPer::Second(500.0)),
+            ("1.5hps", HitsPer::Second(1.5)),
+        ];
+
+        for (template, expect) in values {
+            let pre = PreTemplate::from_yaml_str(template).expect("should be valid yaml");
+            let value = PreHitsPer(pre)
+                .evaluate(&Default::default())
+                .expect("should be valid HitsPer template");
+            assert_eq!(value, expect);
         }
     }
 

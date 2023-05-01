@@ -4,9 +4,12 @@ use crate::error::{CreatingExpressionError, ExecutingExpressionError};
 use crate::json_value_to_string;
 use crate::select_parser::ProviderStream;
 
+use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine};
 use ether::{Either, Either3, EitherExt};
 use futures::{stream, Stream, StreamExt, TryStreamExt};
 use jsonpath_lib as json_path;
+use log::warn;
+use percent_encoding::AsciiSet;
 use rand::distributions::{Distribution, Uniform};
 use regex::Regex;
 use serde_json as json;
@@ -38,14 +41,14 @@ impl Collect {
     ) -> Result<Self, CreatingExpressionError> {
         match args.len() {
             2 | 3 => {
-                let second = as_u64(&args.remove(1)).ok_or_else(|| {
+                let second = as_u64(&args.remove(1)).ok_or({
                     ExecutingExpressionError::InvalidFunctionArguments("collect", marker)
                 })?;
                 let first = args.remove(0);
                 let third = args
                     .pop()
                     .map(|fa| {
-                        let max = as_u64(&fa).ok_or_else(|| {
+                        let max = as_u64(&fa).ok_or({
                             ExecutingExpressionError::InvalidFunctionArguments("collect", marker)
                         });
                         Ok::<_, CreatingExpressionError>(Uniform::new(second, max?))
@@ -144,31 +147,79 @@ enum Encoding {
     Percent,
     PercentPath,
     PercentUserinfo,
+    NonAlphanumeric,
 }
+
+// https://github.com/servo/rust-url/blob/master/UPGRADING.md
+// Prepackaged encoding sets, like QUERY_ENCODE_SET and PATH_SEGMENT_ENCODE_SET, are no longer provided.
+// You will need to read the specifications relevant to your domain and construct your own encoding sets
+// by using the percent_encoding::AsciiSet builder methods on either of the base encoding sets,
+// percent_encoding::CONTROLS or percent_encoding::NON_ALPHANUMERIC.
+
+/// This encode set is used in the URL parser for query strings.
+///
+/// Aside from special chacters defined in the [`SIMPLE_ENCODE_SET`](struct.SIMPLE_ENCODE_SET.html),
+/// space, double quote ("), hash (#), and inequality qualifiers (<), (>) are encoded.
+const QUERY_ENCODE_SET: &AsciiSet = &percent_encoding::CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'<')
+    .add(b'>');
+/// This encode set is used for path components.
+///
+/// Aside from special chacters defined in the [`SIMPLE_ENCODE_SET`](struct.SIMPLE_ENCODE_SET.html),
+/// space, double quote ("), hash (#), inequality qualifiers (<), (>), backtick (`),
+/// question mark (?), and curly brackets ({), (}) are encoded.
+const DEFAULT_ENCODE_SET: &AsciiSet = &QUERY_ENCODE_SET.add(b'`').add(b'?').add(b'{').add(b'}');
+/// This encode set is used for on '/'-separated path segment
+///
+/// Aside from special chacters defined in the [`SIMPLE_ENCODE_SET`](struct.SIMPLE_ENCODE_SET.html),
+/// space, double quote ("), hash (#), inequality qualifiers (<), (>), backtick (`),
+/// question mark (?), and curly brackets ({), (}), percent sign (%), forward slash (/) are
+/// encoded.
+const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &DEFAULT_ENCODE_SET.add(b'%').add(b'/');
+/// This encode set is used for username and password.
+///
+/// Aside from special chacters defined in the [`SIMPLE_ENCODE_SET`](struct.SIMPLE_ENCODE_SET.html),
+/// space, double quote ("), hash (#), inequality qualifiers (<), (>), backtick (`),
+/// question mark (?), and curly brackets ({), (}), forward slash (/), colon (:), semi-colon (;),
+/// equality (=), at (@), backslash (\\), square brackets ([), (]), caret (\^), and pipe (|) are
+/// encoded.
+const USERINFO_ENCODE_SET: &AsciiSet = &DEFAULT_ENCODE_SET
+    .add(b'/')
+    .add(b':')
+    .add(b';')
+    .add(b'=')
+    .add(b'@')
+    .add(b'[')
+    .add(b'\\')
+    .add(b']')
+    .add(b'^')
+    .add(b'|');
 
 impl Encoding {
     fn encode(self, d: &json::Value) -> String {
         let s = json_value_to_string(Cow::Borrowed(d));
         match self {
-            Encoding::Base64 => base64::encode(s.as_str()),
+            Encoding::Base64 => STANDARD_NO_PAD.encode(s.as_str()),
             Encoding::PercentSimple => {
-                percent_encoding::utf8_percent_encode(&s, percent_encoding::SIMPLE_ENCODE_SET)
-                    .to_string()
+                percent_encoding::utf8_percent_encode(&s, percent_encoding::CONTROLS).to_string()
             }
             Encoding::PercentQuery => {
-                percent_encoding::utf8_percent_encode(&s, percent_encoding::QUERY_ENCODE_SET)
-                    .to_string()
+                percent_encoding::utf8_percent_encode(&s, QUERY_ENCODE_SET).to_string()
             }
             Encoding::Percent => {
-                percent_encoding::utf8_percent_encode(&s, percent_encoding::DEFAULT_ENCODE_SET)
-                    .to_string()
+                percent_encoding::utf8_percent_encode(&s, DEFAULT_ENCODE_SET).to_string()
             }
             Encoding::PercentPath => {
-                percent_encoding::utf8_percent_encode(&s, percent_encoding::PATH_SEGMENT_ENCODE_SET)
-                    .to_string()
+                percent_encoding::utf8_percent_encode(&s, PATH_SEGMENT_ENCODE_SET).to_string()
             }
             Encoding::PercentUserinfo => {
-                percent_encoding::utf8_percent_encode(&s, percent_encoding::USERINFO_ENCODE_SET)
+                percent_encoding::utf8_percent_encode(&s, USERINFO_ENCODE_SET).to_string()
+            }
+            Encoding::NonAlphanumeric => {
+                percent_encoding::utf8_percent_encode(&s, percent_encoding::NON_ALPHANUMERIC)
                     .to_string()
             }
         }
@@ -182,6 +233,7 @@ impl Encoding {
             "percent" => Ok(Encoding::Percent),
             "percent-path" => Ok(Encoding::PercentPath),
             "percent-userinfo" => Ok(Encoding::PercentUserinfo),
+            "non-alphanumeric" => Ok(Encoding::NonAlphanumeric),
             _ => Err(ExecutingExpressionError::InvalidFunctionArguments("encode", marker).into()),
         }
     }
@@ -227,7 +279,7 @@ impl Encode {
     ) -> Result<Cow<'a, json::Value>, ExecutingExpressionError> {
         self.arg
             .evaluate(d, no_recoverable_error, for_each)
-            .map(|v| Cow::Owned(Encode::evaluate_with_arg(self.encoding, &*v)))
+            .map(|v| Cow::Owned(Encode::evaluate_with_arg(self.encoding, &v)))
     }
 
     pub(super) fn evaluate_as_iter<'a, 'b: 'a>(
@@ -410,11 +462,17 @@ impl Epoch {
         }
     }
 
+    #[allow(clippy::unnecessary_wraps)]
     pub(super) fn evaluate<'a>(self) -> Result<Cow<'a, json::Value>, ExecutingExpressionError> {
-        let start = SystemTime::now();
-        let since_the_epoch = start
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_else(|_| Duration::from_secs(0));
+        // https://github.com/rustwasm/wasm-pack/issues/724#issuecomment-776892489
+        // SystemTime is not supported by wasm-pack. So for wasm-pack builds, we'll use js_sys::Date
+        let since_the_epoch = if cfg!(target_arch = "wasm32") {
+            Duration::from_millis(js_sys::Date::now() as u64)
+        } else {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_else(|_| Duration::from_secs(0))
+        };
         let n = match self {
             Epoch::Seconds => u128::from(since_the_epoch.as_secs()),
             Epoch::Milliseconds => since_the_epoch.as_millis(),
@@ -487,7 +545,7 @@ impl If {
         let first = self
             .first
             .evaluate(Cow::Borrowed(&*d), no_recoverable_error, for_each)?;
-        if bool_value(&*first) {
+        if bool_value(&first) {
             Ok(self.second.evaluate(d, no_recoverable_error, for_each)?)
         } else {
             Ok(self.third.evaluate(d, no_recoverable_error, for_each)?)
@@ -579,8 +637,8 @@ impl Join {
     ) -> Result<Either<Self, json::Value>, CreatingExpressionError> {
         match args.as_slice() {
             [_, ValueOrExpression::Value(Value::Json(json::Value::String(_)))] => {
-                let two = into_string(args.pop().expect("join should have two args")).ok_or_else(
-                    || ExecutingExpressionError::InvalidFunctionArguments("join", marker),
+                let two = into_string(args.pop().expect("join should have two args")).ok_or(
+                    ExecutingExpressionError::InvalidFunctionArguments("join", marker),
                 )?;
                 let one = args.pop().expect("join should have two args");
                 if let ValueOrExpression::Value(Value::Json(json)) = &one {
@@ -597,12 +655,11 @@ impl Join {
             }
             [_, ValueOrExpression::Value(Value::Json(json::Value::String(_))), ValueOrExpression::Value(Value::Json(json::Value::String(_)))] =>
             {
-                let three = into_string(args.pop().expect("join should have two args"))
-                    .ok_or_else(|| {
-                        ExecutingExpressionError::InvalidFunctionArguments("join", marker)
-                    })?;
-                let two = into_string(args.pop().expect("join should have two args")).ok_or_else(
-                    || ExecutingExpressionError::InvalidFunctionArguments("join", marker),
+                let three = into_string(args.pop().expect("join should have two args")).ok_or({
+                    ExecutingExpressionError::InvalidFunctionArguments("join", marker)
+                })?;
+                let two = into_string(args.pop().expect("join should have two args")).ok_or(
+                    ExecutingExpressionError::InvalidFunctionArguments("join", marker),
                 )?;
                 let one = args.pop().expect("join should have two args");
                 if let ValueOrExpression::Value(Value::Json(json)) = &one {
@@ -649,7 +706,7 @@ impl Join {
     ) -> Result<Cow<'a, json::Value>, ExecutingExpressionError> {
         self.arg
             .evaluate(d, no_recoverable_error, for_each)
-            .map(|d| Cow::Owned(Join::evaluate_with_arg(&self.sep, &self.sep2, &*d)))
+            .map(|d| Cow::Owned(Join::evaluate_with_arg(&self.sep, &self.sep2, &d)))
     }
 
     pub(super) fn evaluate_as_iter<'a, 'b: 'a>(
@@ -690,7 +747,13 @@ pub(super) struct JsonPath {
 
 impl fmt::Debug for JsonPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "JsonPath {{ provider: {} }}", self.provider)
+        write!(
+            f,
+            "JsonPath {{ provider: {}, line: {}, column: {} }}",
+            self.provider,
+            self.marker.line(),
+            self.marker.col()
+        )
     }
 }
 
@@ -707,8 +770,8 @@ impl JsonPath {
                     // parse out the provider name, or if it's `request` or `response` get the second layer
                     let param_name_re = Regex::new(r"^((?:request\.|response\.)?[^\[.]*)").unwrap();
                     param_name_re
-                        .captures(&*json_path)
-                        .ok_or_else(|| {
+                        .captures(json_path)
+                        .ok_or({
                             ExecutingExpressionError::InvalidFunctionArguments("json_path", marker)
                         })?
                         .get(1)
@@ -717,9 +780,9 @@ impl JsonPath {
                 };
                 // jsonpath requires the query to start with `$.`, so add it in
                 let json_path = if json_path.starts_with('[') {
-                    format!("${}", json_path)
+                    format!("${json_path}")
                 } else {
-                    format!("$.{}", json_path)
+                    format!("$.{json_path}")
                 };
                 let json_path = json_path::Parser::compile(&json_path).map_err(|_| {
                     ExecutingExpressionError::InvalidFunctionArguments("json_path", marker)
@@ -755,7 +818,7 @@ impl JsonPath {
     }
 
     pub(super) fn evaluate<'a, 'b: 'a>(&'b self, d: Cow<'a, json::Value>) -> Cow<'a, json::Value> {
-        let v = self.evaluate_to_vec(&*d);
+        let v = self.evaluate_to_vec(&d);
         Cow::Owned(v.into())
     }
 
@@ -763,7 +826,7 @@ impl JsonPath {
         &'b self,
         d: Cow<'a, json::Value>,
     ) -> impl Iterator<Item = Cow<'a, json::Value>> + Clone {
-        self.evaluate_to_vec(&*d).into_iter().map(Cow::Owned)
+        self.evaluate_to_vec(&d).into_iter().map(Cow::Owned)
     }
 
     pub(super) fn into_stream<
@@ -827,7 +890,7 @@ impl Match {
 
     fn evaluate_with_arg(regex: &Regex, capture_names: &[String], d: &json::Value) -> json::Value {
         let search_str = json_value_to_string(Cow::Borrowed(d));
-        if let Some(captures) = regex.captures(&*search_str) {
+        if let Some(captures) = regex.captures(&search_str) {
             let map: json::Map<String, json::Value> = capture_names
                 .iter()
                 .zip(captures.iter())
@@ -854,7 +917,7 @@ impl Match {
         self.arg
             .evaluate(d, no_recoverable_error, for_each)
             .map(|d| {
-                let v = Match::evaluate_with_arg(&self.regex, &self.capture_names, &*d);
+                let v = Match::evaluate_with_arg(&self.regex, &self.capture_names, &d);
                 Cow::Owned(v)
             })
     }
@@ -928,8 +991,8 @@ impl MinMax {
             (Cow::Owned(json::Value::Null), 0),
             |(left, count), right| {
                 let right = right?;
-                let l = f64_value(&*left);
-                let r = f64_value(&*right);
+                let l = f64_value(&left);
+                let r = f64_value(&right);
                 let v = match (l.partial_cmp(&r), min, l.is_finite()) {
                     (Some(Ordering::Less), true, _)
                     | (Some(Ordering::Greater), false, _)
@@ -951,7 +1014,7 @@ impl MinMax {
         let mut left: Option<(f64, json::Value)> = None;
         for fa in &self.args {
             let right = fa.evaluate(Cow::Borrowed(&*d), no_recoverable_error, for_each)?;
-            let r = f64_value(&*right);
+            let r = f64_value(&right);
             if let Some((l, _)) = &left {
                 match (l.partial_cmp(&r), self.min, l.is_finite()) {
                     (Some(Ordering::Less), true, _)
@@ -995,7 +1058,7 @@ impl MinMax {
             let values = values?;
             let iter = values.iter().map(|v| Ok(Cow::Borrowed(&v.0)));
             let v = MinMax::eval_iter(min, iter)?.0.into_owned();
-            let returns = values.into_iter().map(|v| v.1).flatten().collect();
+            let returns = values.into_iter().flat_map(|v| v.1).collect();
             Ok((v, returns))
         })
     }
@@ -1016,10 +1079,11 @@ impl Pad {
         marker: Marker,
     ) -> Result<Either<Self, json::Value>, CreatingExpressionError> {
         let as_usize = |fa| match fa {
-            ValueOrExpression::Value(Value::Json(json::Value::Number(ref n))) if n.is_u64() => n
-                .as_u64()
-                .map(|n| n as usize)
-                .ok_or_else(|| ExecutingExpressionError::InvalidFunctionArguments("pad", marker)),
+            ValueOrExpression::Value(Value::Json(json::Value::Number(ref n))) if n.is_u64() => {
+                n.as_u64().map(|n| n as usize).ok_or(
+                    ExecutingExpressionError::InvalidFunctionArguments("pad", marker),
+                )
+            }
             _ => Err(ExecutingExpressionError::InvalidFunctionArguments(
                 "pad", marker,
             )),
@@ -1027,10 +1091,9 @@ impl Pad {
         match args.as_slice() {
             [_, ValueOrExpression::Value(Value::Json(json::Value::Number(_))), ValueOrExpression::Value(Value::Json(json::Value::String(_)))] =>
             {
-                let third = into_string(args.pop().expect("pad should have three args"))
-                    .ok_or_else(|| {
-                        ExecutingExpressionError::InvalidFunctionArguments("pad", marker)
-                    })?;
+                let third = into_string(args.pop().expect("pad should have three args")).ok_or(
+                    ExecutingExpressionError::InvalidFunctionArguments("pad", marker),
+                )?;
                 let second = as_usize(args.pop().expect("pad should have three args"))?;
                 let first = args.pop().expect("pad should have three args");
                 if let ValueOrExpression::Value(Value::Json(json)) = &first {
@@ -1080,7 +1143,7 @@ impl Pad {
         self.arg
             .evaluate(d, no_recoverable_error, for_each)
             .map(|d| {
-                let v = Pad::evaluate_with_arg(&self.padding, self.min_length, self.start, &*d);
+                let v = Pad::evaluate_with_arg(&self.padding, self.min_length, self.start, &d);
                 Cow::Owned(v)
             })
     }
@@ -1222,10 +1285,10 @@ impl Range {
                     ValueOrExpression::Value(Value::Json(_)),
                     ValueOrExpression::Value(Value::Json(_)),
                 ) => {
-                    let first = as_u64(&first).ok_or_else(|| {
+                    let first = as_u64(&first).ok_or({
                         ExecutingExpressionError::InvalidFunctionArguments("range", marker)
                     })?;
-                    let second = as_u64(&second).ok_or_else(|| {
+                    let second = as_u64(&second).ok_or({
                         ExecutingExpressionError::InvalidFunctionArguments("range", marker)
                     })?;
                     Ok(Range::Range(ReversibleRange::new(first, second)))
@@ -1263,15 +1326,15 @@ impl Range {
                 let first = first
                     .evaluate(Cow::Borrowed(&*d), no_recoverable_error, for_each)?
                     .as_u64()
-                    .ok_or_else(|| {
-                        ExecutingExpressionError::InvalidFunctionArguments("range", *marker)
-                    })?;
+                    .ok_or(ExecutingExpressionError::InvalidFunctionArguments(
+                        "range", *marker,
+                    ))?;
                 let second = second
                     .evaluate(d, no_recoverable_error, for_each)?
                     .as_u64()
-                    .ok_or_else(|| {
-                        ExecutingExpressionError::InvalidFunctionArguments("range", *marker)
-                    })?;
+                    .ok_or(ExecutingExpressionError::InvalidFunctionArguments(
+                        "range", *marker,
+                    ))?;
                 ReversibleRange::new(first, second)
             }
             Range::Range(r) => r.clone(),
@@ -1296,10 +1359,10 @@ impl Range {
                     .map(move |(l, r)| {
                         let (first, mut returns) = l?;
                         let (second, returns2) = r?;
-                        let first = first.as_u64().ok_or_else(|| {
+                        let first = first.as_u64().ok_or({
                             ExecutingExpressionError::InvalidFunctionArguments("range", marker)
                         })?;
-                        let second = second.as_u64().ok_or_else(|| {
+                        let second = second.as_u64().ok_or({
                             ExecutingExpressionError::InvalidFunctionArguments("range", marker)
                         })?;
                         let v = json::Value::Array(
@@ -1336,13 +1399,13 @@ impl Repeat {
     ) -> Result<Self, CreatingExpressionError> {
         match args.len() {
             1 | 2 => {
-                let min = as_u64(&args.remove(0)).ok_or_else(|| {
+                let min = as_u64(&args.remove(0)).ok_or({
                     ExecutingExpressionError::InvalidFunctionArguments("repeat", marker)
                 })?;
                 let random = args
                     .pop()
                     .map(|fa| {
-                        let max = as_u64(&fa).ok_or_else(|| {
+                        let max = as_u64(&fa).ok_or({
                             ExecutingExpressionError::InvalidFunctionArguments("repeat", marker)
                         });
                         Ok::<_, CreatingExpressionError>(Uniform::new(min, max?))
@@ -1477,7 +1540,7 @@ impl Replace {
                 .evaluate(Cow::Borrowed(&*d), no_recoverable_error, for_each)?;
         let replacer = json_value_to_string(replacer_value).into_owned();
         let mut haystack = self.haystack.evaluate(d, no_recoverable_error, for_each)?;
-        Replace::replace(haystack.to_mut(), &*needle, &*replacer);
+        Replace::replace(haystack.to_mut(), &needle, &replacer);
         Ok(haystack)
     }
 
@@ -1518,6 +1581,105 @@ impl Replace {
                 Replace::replace(&mut haystack, &needle, &replacer);
                 Ok((haystack, returns))
             })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct ParseNum {
+    arg: ValueOrExpression,
+    is_float: bool,
+}
+
+impl ParseNum {
+    pub(super) fn new(
+        float: bool,
+        mut args: Vec<ValueOrExpression>,
+        marker: Marker,
+    ) -> Result<Self, CreatingExpressionError> {
+        let function_name = if float { "parseFloat" } else { "parseInt" };
+        match args.len() {
+            1 => {
+                let first = args.remove(0);
+                Ok(ParseNum {
+                    arg: first,
+                    is_float: float,
+                })
+            }
+            _ => Err(
+                ExecutingExpressionError::InvalidFunctionArguments(function_name, marker).into(),
+            ),
+        }
+    }
+
+    /// Converts a json value into either a float or an integer.
+    /// Returns json::Value::Null on ParseFloatError
+    fn evaluate_with_arg(is_float: bool, d: &json::Value) -> json::Value {
+        // Attempt to turn a JSON value into a string
+        let string_to_pad = json_value_to_string(Cow::Borrowed(d)).to_string();
+        let string_to_pad = string_to_pad.trim();
+        // Parse it into a float f64 (we can turn it into an i64 later)
+        let parsed = string_to_pad.parse::<f64>();
+        match parsed {
+            Ok(value) => {
+                if is_float {
+                    value.into()
+                } else {
+                    (value as i64).into()
+                }
+            }
+            Err(error) => {
+                let function_name = if is_float { "parseFloat" } else { "parseInt" };
+                warn!(
+                    "{} failed on \"{}\" with {}",
+                    function_name, string_to_pad, error
+                );
+                json::Value::Null
+            }
+        }
+    }
+
+    pub(super) fn evaluate<'a, 'b: 'a>(
+        &'b self,
+        d: Cow<'a, json::Value>,
+        no_recoverable_error: bool,
+        for_each: Option<&[Cow<'a, json::Value>]>,
+    ) -> Result<Cow<'a, json::Value>, ExecutingExpressionError> {
+        let is_float = self.is_float;
+        self.arg
+            .evaluate(d, no_recoverable_error, for_each)
+            .map(|d| {
+                let v = ParseNum::evaluate_with_arg(is_float, &d);
+                Cow::Owned(v)
+            })
+    }
+
+    pub(super) fn evaluate_as_iter<'a, 'b: 'a>(
+        &'b self,
+        d: Cow<'a, json::Value>,
+        no_recoverable_error: bool,
+        for_each: Option<&[Cow<'a, json::Value>]>,
+    ) -> Result<impl Iterator<Item = Cow<'a, json::Value>> + Clone, ExecutingExpressionError> {
+        // self.evaluate(d, no_recoverable_error, for_each)
+        //     .map(iter::once)
+        Ok(iter::once(self.evaluate(
+            d,
+            no_recoverable_error,
+            for_each,
+        )?))
+    }
+
+    pub(super) fn into_stream<
+        Ar: Clone + Send + Unpin + 'static,
+        P: ProviderStream<Ar> + Send + Unpin + 'static,
+    >(
+        self,
+        providers: &BTreeMap<String, P>,
+        no_recoverable_error: bool,
+    ) -> impl Stream<Item = Result<(json::Value, Vec<Ar>), ExecutingExpressionError>> {
+        let is_float = self.is_float;
+        self.arg
+            .into_stream(providers, no_recoverable_error)
+            .map_ok(move |(d, returns)| (ParseNum::evaluate_with_arg(is_float, &d), returns))
     }
 }
 
@@ -1674,6 +1836,11 @@ mod tests {
                 j!("asd%20jkl%7C"),
             ),
             (
+                vec![j!("asd 123~").into(), j!("non-alphanumeric").into()],
+                None,
+                j!("asd%20123%7E"),
+            ),
+            (
                 vec!["a".into(), j!("percent-path").into()],
                 Some(j!({"a": "asd/jkl%"})),
                 j!("asd%2Fjkl%25"),
@@ -1692,6 +1859,11 @@ mod tests {
                 vec!["a".into(), j!("percent-userinfo").into()],
                 Some(j!({"a": "asd jkl|"})),
                 j!("asd%20jkl%7C"),
+            ),
+            (
+                vec!["a".into(), j!("non-alphanumeric").into()],
+                Some(j!({"a": "asd 123~"})),
+                j!("asd%20123%7E"),
             ),
             (
                 vec!["a".into(), j!("base64").into()],
@@ -1737,6 +1909,11 @@ mod tests {
                 vec![j!("asd%20jkl%7C")],
             ),
             (
+                vec!["a".into(), j!("non-alphanumeric").into()],
+                j!({"a": "asd 123~"}),
+                vec![j!("asd%20123%7E")],
+            ),
+            (
                 vec!["a".into(), j!("base64").into()],
                 j!({"a": "foo"}),
                 vec![j!("Zm9v")],
@@ -1778,7 +1955,11 @@ mod tests {
                 vec!["d".into(), j!("percent-userinfo").into()],
                 j!("asd%20jkl%7C"),
             ),
-            (vec!["e".into(), j!("base64").into()], j!("Zm9v")),
+            (
+                vec!["e".into(), j!("non-alphanumeric").into()],
+                j!("asd%20123%7E"),
+            ),
+            (vec!["f".into(), j!("base64").into()], j!("Zm9v")),
         ];
 
         let providers = btreemap!(
@@ -1786,7 +1967,8 @@ mod tests {
             "b".to_string() => literals(vec!(j!("asd\njkl#"))),
             "c".to_string() => literals(vec!(j!("asd\njkl{"))),
             "d".to_string() => literals(vec!(j!("asd jkl|"))),
-            "e".to_string() => literals(vec!(j!("foo"))),
+            "e".to_string() => literals(vec!(j!("asd 123~"))),
+            "f".to_string() => literals(vec!(j!("foo"))),
         );
 
         let providers = Arc::new(providers);
@@ -2786,6 +2968,7 @@ mod tests {
             }
         }
     }
+
     #[test]
     fn range_eval() {
         let data = j!({
@@ -3037,6 +3220,124 @@ mod tests {
                 .unwrap();
 
             assert_eq!(left, right);
+        }
+    }
+
+    #[test]
+    fn parse_num_eval() {
+        // JSON object to use for test
+        let data = j!({
+            "a": "9",
+            "b": "9.1",
+            "c": "foo"
+        });
+        // is_float, constructor args, expect
+        let checks = vec![
+            (true, vec![j!(9.1 as f64).into()], j!(9.1 as f64)),
+            (false, vec![j!(9.1 as f64).into()], j!(9 as i64)),
+            (true, vec![j!("9.1").into()], j!(9.1 as f64)),
+            (false, vec![j!("9.1").into()], j!(9 as i64)),
+            (true, vec![j!("0.0").into()], j!(0.0 as f64)),
+            (false, vec![j!("0.0").into()], j!(0 as i64)),
+            (true, vec![j!("-9.1").into()], j!(-9.1 as f64)),
+            (false, vec![j!("-9.1").into()], j!(-9 as i64)),
+            (true, vec![j!("foo").into()], j!(null)),
+            (false, vec![j!("foo").into()], j!(null)),
+            (true, vec!["a".into()], j!(9.0 as f64)),
+            (false, vec!["a".into()], j!(9 as i64)),
+            (true, vec!["b".into()], j!(9.1 as f64)),
+            (false, vec!["b".into()], j!(9 as i64)),
+            (true, vec!["c".into()], j!(null)),
+            (false, vec!["c".into()], j!(null)),
+            (true, vec![j!("foo").into()], j!(null)),
+            (false, vec![j!("foo").into()], j!(null)),
+        ];
+        for (i, (is_float, args, expect)) in checks.into_iter().enumerate() {
+            let r = ParseNum::new(is_float, args.clone(), create_marker()).unwrap();
+            let actual = r.evaluate(Cow::Borrowed(&data), false, None).unwrap();
+            assert_eq!(
+                *actual, expect,
+                "index: {}, is_float: {}, args: {:?}",
+                i, is_float, args
+            );
+        }
+    }
+
+    #[test]
+    fn parse_num_eval_iter() {
+        let data = j!({
+            "a": "9.1",
+            "b": "foo",
+        });
+        // is_float, constructor args, expect
+        let checks = vec![
+            (true, vec!["a".into()], j!(9.1 as f64)),
+            (false, vec!["a".into()], j!(9 as i64)),
+            (true, vec!["b".into()], j!(null)),
+            (false, vec!["b".into()], j!(null)),
+        ];
+
+        for (i, (is_float, args, expect)) in checks.into_iter().enumerate() {
+            let parse_num = ParseNum::new(is_float, args, create_marker()).unwrap();
+            let actual: Vec<_> = parse_num
+                .evaluate_as_iter(Cow::Borrowed(&data), false, None)
+                .unwrap()
+                .map(Cow::into_owned)
+                .collect();
+            assert_eq!(actual, vec!(expect), "index: {}", i);
+        }
+    }
+
+    #[test]
+    fn parse_num_into_stream() {
+        // is_float, constructor args, expect
+        let checks = vec![
+            (true, vec!["a".into()], j!(9.1 as f64)),
+            (false, vec!["a".into()], j!(9.1 as i64)),
+            (true, vec!["b".into()], j!(null)),
+            (false, vec!["b".into()], j!(null)),
+        ];
+
+        let providers = btreemap!(
+            "a".to_string() => literals(vec!(j!("9.1"))),
+            "b".to_string() => literals(vec!(j!("foo"))),
+        );
+
+        let providers = Arc::new(providers);
+
+        for (i, (is_float, args, expect)) in checks.into_iter().enumerate() {
+            let parse_num = ParseNum::new(is_float, args, create_marker()).unwrap();
+            let actual = block_on_stream(parse_num.into_stream(&providers, false))
+                .map(|r| r.map(|(v, _)| v))
+                .next()
+                .unwrap()
+                .unwrap();
+            assert_eq!(actual, expect, "index: {}", i);
+        }
+    }
+
+    #[test]
+    fn random_into_stream2() {
+        let args = vec![(j!(1), j!(5)), (j!(-8), j!(25)), (j!(-8.5), j!(25))];
+
+        for (first, second) in args {
+            let r = Random::new(
+                vec![first.clone().into(), second.clone().into()],
+                create_marker(),
+            )
+            .unwrap();
+
+            let left = block_on_stream(r.into_stream::<Literals>())
+                .map(|r| r.map(|(v, _)| v))
+                .next()
+                .unwrap()
+                .unwrap();
+
+            if first.is_u64() && second.is_u64() {
+                let left = left.as_u64().unwrap();
+                let check = left >= first.as_u64().unwrap() && left < second.as_u64().unwrap();
+                assert!(check);
+            }
         }
     }
 }

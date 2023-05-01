@@ -1,3 +1,4 @@
+use log::{debug, info};
 use std::{future::Future, io, str::FromStr, sync::Arc, time::Duration};
 
 use futures::{channel::oneshot, future::select, FutureExt};
@@ -24,13 +25,16 @@ async fn echo_route(req: Request<Body>) -> Response<Body> {
         .path_and_query()
         .map(|piece| piece.as_str())
         .unwrap_or_else(|| uri.path());
-    let url = Url::parse(&format!("http://127.0.0.1:8080{}", url)).unwrap();
+    let url = Url::parse(&format!("http://127.0.0.1:8080{url}")).unwrap();
     for (k, v) in url.query_pairs() {
         match &*k {
             "echo" => echo = Some(v.to_string()),
             "wait" => wait = Some(v.to_string()),
             _ => (),
         }
+    }
+    if echo.is_some() {
+        debug!("Echo Body = {}", echo.clone().unwrap_or_default());
     }
     let mut response = match (req.method(), echo) {
         (&http::Method::GET, Some(b)) => Response::builder()
@@ -48,8 +52,11 @@ async fn echo_route(req: Request<Body>) -> Response<Body> {
             .body(Body::empty())
             .unwrap(),
     };
-    let ms = wait.and_then(|c| FromStr::from_str(&*c).ok()).unwrap_or(0);
+    let ms = wait.and_then(|c| FromStr::from_str(&c).ok()).unwrap_or(0);
     let old_body = std::mem::replace(response.body_mut(), Body::empty());
+    if ms > 0 {
+        debug!("waiting {} ms", ms);
+    }
     Delay::new(Duration::from_millis(ms)).await;
     let _ = std::mem::replace(response.body_mut(), old_body);
     response
@@ -63,6 +70,10 @@ pub fn start_test_server(
 
     let make_svc = make_service_fn(|_: &AddrStream| async {
         let service = service_fn(|req: Request<Body>| async {
+            debug!("{:?}", req);
+            let method = req.method().to_string();
+            let uri = req.uri().to_string();
+            let headers = req.headers().clone();
             let response = match req.uri().path() {
                 "/" => echo_route(req).await,
                 _ => Response::builder()
@@ -70,6 +81,15 @@ pub fn start_test_server(
                     .body(Body::empty())
                     .unwrap(),
             };
+            debug!("{:?}", response);
+            info!(
+                "method=\"{}\" uri=\"{}\" status=\"{}\" request_headers={:?} response_headers={:?}",
+                method,
+                uri,
+                response.status(),
+                headers,
+                response.headers()
+            );
             Ok::<_, Error>(response)
         });
         Ok::<_, Error>(service)
@@ -83,6 +103,7 @@ pub fn start_test_server(
 
     let future = select(server, rx);
 
+    debug!("start_test_server tokio::spawn future");
     let handle = tokio::spawn(future).map(|_| ());
 
     (port, tx, handle)

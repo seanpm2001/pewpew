@@ -4,8 +4,53 @@ Pewpew is an HTTP load test tool designed for ease of use and high performance. 
 ![Release](https://github.com/FamilySearch/pewpew/workflows/Release/badge.svg)
 
 ## Changelog
+### v0.5.12
+Changes:
+- Try Run: Clap no longer allows multiple occurences, it only allows multiple passed on one occurence. See [Simplify the takes_value API (range-based takes_values)](https://github.com/clap-rs/clap/issues/2688) and [Clap CHANGELOG](https://github.com/clap-rs/clap/blob/master/CHANGELOG.md#400---2022-09-28). This does introduce a bug that if you specify the config file immediately after --include(s) it will think it's part of the --include. The user must either pass another option after -i or put the config file before the -i
+- Removed the old Svelte Results Viewer
+
+Bug fixes:
+- Updated dependencies
+
+### v0.5.11
+Changes:
+- Added armv7 (Raspberry Pi) and aarch64 (AWS Graviton) builds
+- Due to standard library changes to Durations, [conversions from float to Durations are now rounded rather than truncated](https://github.com/rust-lang/rust/pull/96051)
+
+Bug fixes:
+- Updated dependencies
+
+### v0.5.10
+Changes:
+- Added logging to the binaries. All binaries now support turning on logging via the `RUST_LOG` environment variable. The default value is `error`. Other available options are `warn`, `info`, `debug`, `trace`, and `off`.
+- Changed the log_provider_stats to be a boolean (default on)
+  - For historical purposes, durations will be allowed and be considered true
+- Changed the default try script output to log `headers_all` rather than `headers`. There were complaints about not seeing duplicate headers causing confusion over what was being sent.
+- Change try script output to go through stdout instead of stderr.
+- Modified the Config WebAssembly (config-wasm) to also return file body paths from the `getInputFiles()` method.
+- Added a new `encode()` option. `encode(value, "non-alphanumeric")` will encode all characters that are not an ASCII letter or digit.
+- Added new expressions `parseInt()` and `parseFloat()` which will attempt to convert a string to an integer or float (respectively). Returns `null` if unable to convert.
+
+Bug fixes:
+- Upgrade percent-encoding, clap, and other dependencies
+
+### v0.5.9
+Bug fixes:
+- Upgrade tokio and other dependencies
+- Added a link to the Har to Yaml converter in the docs.
+
+### v0.5.8
+Changes:
+- Add in the ability for providers to be "unique"--meaning each item within the provider will be a unique JSON value without duplicates.
+- Add in the ability for `peak_load` to have a decimal.
+
+Bug fixes:
+- Refactor providers to resolve issues where some tests would see memory leaks and extraneous CPU usage.
+- Fix regression from v0.5.6 where sending a file as part of a request's body did not work.
+- Fix the config parser web assembly issue with using `epoch` in logger file names.
+
 ### v0.5.7
-Bugfix:
+Bug fixes:
 - Fix regression in v0.5.6 where pewpew does not sleep properly between endpoint calls, effectively disregarding any load limits.
 
 ### v0.5.6
@@ -16,7 +61,7 @@ Changes:
 - Make "endpoint was delayed waiting for provider" messages less noisy.
 - Allow the `--watch` CLI flag to modify the test for any change in a config file.
 
-Bugfix:
+Bug fixes:
 - Fix regression introduced in v0.5.5 where specifying a `provider` multiple times in a `provides` would only use the last specified one.
 - Fix bug where non-ascii characters could cause an error reading a file when using the `line` (default) `format`.
 - Fix bug where the `line` `format` of a file provider would incorrectly parse files with lines longer than 8KB.
@@ -31,7 +76,7 @@ Changes:
 - Add optional `request_timeout` option to `endpoints`.
 - Refactor config parser to provide more helpful messages when an error occurs.
 
-Bugfix:
+Bug fixes:
 - Fix regression where certain errors which should be handled during a test were causing the test to crash.
 - Fix bug where a load_pattern did not work when doing `from: 0%` and `to: 0%`.
 
@@ -39,7 +84,7 @@ Bugfix:
 Changes:
 - Add `stats-file` command-line flag to specify the name of the stats file.
 
-Bugfix:
+Bug fixes:
 - Fix bug where a `logs` expression would get `null` for `response` and `request` fields unless they were also references within a `provides`.
 - Fix bug where tests would crash if a response header was a not UTF8 encoded.
 
@@ -49,7 +94,7 @@ Changes:
 - Expand cases when an endpoint can have no `peak_load` to include the case when the endpoint depends upon a `response` provider.
 - Swap out the JSONPath library for one that supports more JSONPath expressions.
 
-Bugfix:
+Bug fixes:
 - Raise an error if `for_each` is referenced but not defined.
 - Fix bug where the config parser would erroneously say there was a recursive `for_each`.
 
@@ -59,7 +104,7 @@ Changes:
 - Change stats to go through stdout instead of stderr.
 - Print stats for an endpoint even if it only experienced errors.
 
-Bugfix:
+Bug fixes:
 - Fix issue where `request.body` would display the wrong file name when the request body was a file.
 - Fix message displayed as `request.body` when the request body is a file to be consistent with other similar messages and have double braces as delimiters.
 - Fix issue where the `config.client.request_timeout` and `config.client.keepalive` were not being parsed properly from the config file.
@@ -82,7 +127,7 @@ Breaking changes:
 - Rename the `static_list` provider type to `list`.
 - Allow the same header name to be used multiple times in a request (in compliance with HTTP specs). Headers which are set through `config.client.headers` can be unset in the `endpoints.headers` sub-section by setting the value to `null`.
 
-Bugfix:
+Bug fixes:
 - Fix an issue where loggers would not log for a request if a warning level error happened.
 - Fix performance regression introduced in v0.4.9.
 - Fix performance regression introduced in v0.4.10.

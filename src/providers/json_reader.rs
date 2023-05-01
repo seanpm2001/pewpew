@@ -1,4 +1,3 @@
-use futures::Stream;
 use rand::distributions::{Distribution, Uniform};
 use serde_json as json;
 
@@ -8,6 +7,7 @@ use std::{
     iter::{self, Iterator},
 };
 
+// A type of file reader that reads json values from a file
 pub struct JsonReader {
     staging_buffer: Vec<u8>,
     buffer: Vec<u8>,
@@ -87,8 +87,8 @@ impl JsonReader {
                     return Some(Err(e.into()));
                 }
             }
-            let mut buf = &mut self.staging_buffer[..8 * (1 << 10)];
-            match self.reader.read(&mut buf) {
+            let buf = &mut self.staging_buffer[..8 * (1 << 10)];
+            match self.reader.read(buf) {
                 Err(e) => return Some(Err(e)),
                 Ok(n) => {
                     if n == 0 {
@@ -98,10 +98,6 @@ impl JsonReader {
                 }
             }
         }
-    }
-
-    pub fn into_stream(self) -> impl Stream<Item = Result<json::Value, io::Error>> {
-        super::into_stream(self)
     }
 }
 
