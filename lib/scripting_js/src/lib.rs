@@ -9,12 +9,7 @@ use message::{Header, IncomingMessage, IncomingResponse, OutgoingMessage};
 use serde_json as json;
 use tokio::{io::AsyncWriteExt, process};
 
-use std::{
-    cell::RefCell,
-    collections::BTreeMap,
-    process::Stdio,
-    rc::Rc,
-};
+use std::{cell::RefCell, collections::BTreeMap, process::Stdio, rc::Rc};
 
 pub struct JsScripting {
     op_state: Rc<RefCell<OpState>>,
@@ -36,7 +31,7 @@ impl JsFunctions {
         self.pre_fns.push(fn_body);
         Ok(i)
     }
-    
+
     pub fn add_endpoint_post_fn(&mut self, fn_body: String) -> Result<usize, JsError> {
         todo!("append function header and parse into AST to check for correctness");
         let i = self.post_fns.len();
@@ -75,7 +70,12 @@ impl JsScripting {
         unimplemented!()
     }
 
-    pub async fn call_endpoint_post_fn(&mut self, fn_id: usize, request: json::Value, response: json::Value) {
+    pub async fn call_endpoint_post_fn(
+        &mut self,
+        fn_id: usize,
+        request: json::Value,
+        response: json::Value,
+    ) {
         unimplemented!()
     }
 }
