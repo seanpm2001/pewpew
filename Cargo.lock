@@ -279,6 +279,7 @@ dependencies = [
  "jsonpath_lib",
  "log",
  "maplit",
+ "once_cell",
  "percent-encoding",
  "pest",
  "pest_derive",
