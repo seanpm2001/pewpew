@@ -59,6 +59,7 @@ impl Template {
 /// Two [`OrTemplated`] are considered equal if:
 ///  - They have both been evaluated, and their values are equal.
 ///  - Neither has been evaluated, and the template strings are identical.
+///
 /// In any other case, the two are not considered equal.
 ///
 /// ## Examples
