@@ -5,7 +5,9 @@
 
 use once_cell::{sync::Lazy, unsync::OnceCell};
 use regex::Regex;
-use std::{borrow::Cow, collections::BTreeMap, str::FromStr};
+use serde::Deserialize;
+use std::{borrow::Cow, collections::BTreeMap, convert::TryFrom, fmt::Display, str::FromStr};
+use thiserror::Error;
 
 // just using pure Strings for now
 pub type Vars = BTreeMap<String, String>;
@@ -13,7 +15,7 @@ pub type Vars = BTreeMap<String, String>;
 static TEMPLATE_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"\$\{(.*?)}").unwrap());
 
 // TODO: handle providers and expressions (or just go straight to scripting)
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
 struct Template(String);
 
 impl Template {
@@ -51,7 +53,8 @@ impl Template {
 /// later. Since the vars are meant to be unchanged for the duration of the program runtime
 /// (at least not without refreshing the entire config file), passing in different vars later
 /// will not update the contained value.
-#[derive(Debug)]
+#[derive(Debug, Deserialize, Clone)]
+#[serde(try_from = "&str")]
 pub struct OrTemplated<T: FromTemplatedStr>(Template, OnceCell<T>);
 
 impl<T: FromTemplatedStr> OrTemplated<T> {
@@ -137,9 +140,17 @@ impl<T: FromTemplatedStr> FromStr for OrTemplated<T> {
     }
 }
 
+impl<T: FromTemplatedStr> TryFrom<&str> for OrTemplated<T> {
+    type Error = <Self as FromStr>::Err;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        value.parse()
+    }
+}
+
 /// Trait for generating types from templated strings.
 pub trait FromTemplatedStr: Sized {
-    type Error;
+    type Error: Display;
 
     /// Generate a `T` from the string, similar to [`FromStr::from_str`].
     fn from_final_str(s: &str) -> Result<Self, TemplateError<Self>>;
@@ -156,11 +167,17 @@ pub trait FromTemplatedStr: Sized {
 }
 
 /// Error in generating a `T` from a templated string.
-#[derive(Debug, PartialEq, Eq)]
-pub enum TemplateError<T: FromTemplatedStr> {
+#[derive(Debug, PartialEq, Eq, Error)]
+pub enum TemplateError<T: FromTemplatedStr>
+where
+    T::Error: Display,
+{
+    #[error("temple string invalid")]
     InvalidTemplate,
+    #[error("var {0} not found")]
     /// Some variable that the templated string requires were not provided.
     VarsNotFound(String),
+    #[error("from str error: {0}")]
     /// An error occurred converting the final string to a `T`.
     FromStrErr(T::Error),
 }
@@ -168,6 +185,7 @@ pub enum TemplateError<T: FromTemplatedStr> {
 impl<T> FromTemplatedStr for T
 where
     T: FromStr,
+    T::Err: Display,
 {
     type Error = T::Err;
 
