@@ -3,3 +3,4 @@ pub use templating::OrTemplated;
 
 pub mod load_pattern;
 pub mod loggers;
+pub mod providers;
