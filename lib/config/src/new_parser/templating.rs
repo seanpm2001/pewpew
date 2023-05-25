@@ -53,9 +53,41 @@ impl Template {
 /// later. Since the vars are meant to be unchanged for the duration of the program runtime
 /// (at least not without refreshing the entire config file), passing in different vars later
 /// will not update the contained value.
-#[derive(Debug, Deserialize, Clone)]
+///
+/// # [`PartialEq`], [`Eq`] behavior
+///
+/// Two [`OrTemplated`] are considered equal if:
+///  - They have both been evaluated, and their values are equal.
+///  - Neither has been evaluated, and the template strings are identical.
+/// In any other case, the two are not considered equal.
+///
+/// ## Examples
+/// ```
+/// # use config::new_parser::templating::{OrTemplated, FromTemplatedStr};
+/// let x = OrTemplated::<u8>::new_literal(27);
+///
+/// let y = u8::from_raw_str("${count}").unwrap();
+/// let _ = y.evaluate(&[("count".to_owned(), "27".to_owned())].into());
+///
+/// assert_eq!(x, y);
+/// ```
+#[derive(Debug, Deserialize, Clone, Eq)]
 #[serde(try_from = "&str")]
 pub struct OrTemplated<T: FromTemplatedStr>(Template, OnceCell<T>);
+
+impl<T, U> PartialEq<OrTemplated<U>> for OrTemplated<T>
+where
+    T: FromTemplatedStr + PartialEq<U>,
+    U: FromTemplatedStr,
+{
+    fn eq(&self, other: &OrTemplated<U>) -> bool {
+        match (self.try_get(), other.try_get()) {
+            (Some(x), Some(y)) => x == y,
+            (None, None) => self.0 == other.0,
+            _ => false,
+        }
+    }
+}
 
 impl<T: FromTemplatedStr> OrTemplated<T> {
     /// Attempt to directly get the represented `T` value.
