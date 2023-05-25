@@ -51,7 +51,7 @@ impl FromStr for Percent {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         use PercentErr::*;
 
-        let base = s.strip_suffix("%").ok_or(NoPercentSign)?;
+        let base = s.strip_suffix('%').ok_or(NoPercentSign)?;
 
         (base.parse::<f64>()? / 100.0).try_into()
     }
