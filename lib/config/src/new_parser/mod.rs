@@ -7,10 +7,11 @@ pub mod providers;
 
 pub mod common {
     use serde::Deserialize;
-    use std::{str::FromStr, time::Duration as SDur};
+    use std::{convert::TryFrom, str::FromStr, time::Duration as SDur};
 
     /// Newtype wrapper around [`std::time::Duration`] that allows implementing the needed traits.
     #[derive(Debug, Deserialize, PartialEq, Clone, Copy)]
+    #[serde(try_from = "&str")]
     pub struct Duration(SDur);
 
     impl FromStr for Duration {
@@ -21,6 +22,14 @@ pub mod common {
             crate::duration_from_string(s.to_owned())
                 .map_err(|_| "invalid duration")
                 .map(Self)
+        }
+    }
+
+    impl TryFrom<&str> for Duration {
+        type Error = <Self as FromStr>::Err;
+
+        fn try_from(value: &str) -> Result<Self, Self::Error> {
+            value.parse()
         }
     }
 
