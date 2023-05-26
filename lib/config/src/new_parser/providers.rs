@@ -4,6 +4,7 @@ use super::OrTemplated;
 use serde::Deserialize;
 
 mod file;
+mod list;
 
 enum ProviderType {
     File(file::FileProvider),
@@ -12,7 +13,7 @@ enum ProviderType {
         buffer: BufferLimit,
         unique: bool,
     },
-    List(ListProvider),
+    List(list::ListProvider),
     Range {
         start: i64,
         end: i64,
@@ -28,24 +29,6 @@ enum ProviderSend {
     Block,
     Force,
     IfNotFull,
-}
-
-/// Should hold nested json objects; just Strings for now
-struct ListProvider {
-    values: Vec<String>,
-    random: bool,
-    repeat: bool,
-    unique: bool,
-}
-
-enum ListProviderTmp {
-    JustAList(Vec<String>),
-    Defined {
-        values: Vec<String>,
-        random: bool,
-        repeat: bool,
-        unique: bool,
-    },
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq, Default, Clone, Copy)]
