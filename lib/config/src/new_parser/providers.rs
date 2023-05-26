@@ -5,6 +5,7 @@ use serde::Deserialize;
 
 mod file;
 mod list;
+mod range;
 
 enum ProviderType {
     File(file::FileProvider),
@@ -14,13 +15,7 @@ enum ProviderType {
         unique: bool,
     },
     List(list::ListProvider),
-    Range {
-        start: i64,
-        end: i64,
-        step: u16,
-        repeat: bool,
-        unique: bool,
-    },
+    Range(range::RangeProvider),
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq, Clone, Copy)]
