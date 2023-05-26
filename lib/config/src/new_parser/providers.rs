@@ -7,11 +7,15 @@ mod file;
 mod list;
 mod range;
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
 enum ProviderType {
     File(file::FileProvider),
     Response {
-        auto_return: ProviderSend,
+        auto_return: Option<ProviderSend>,
+        #[serde(default)]
         buffer: BufferLimit,
+        #[serde(default)]
         unique: bool,
     },
     List(list::ListProvider),
@@ -79,5 +83,79 @@ mod tests {
         assert_eq!(bl, BufferLimit::Limit(43));
         let bl: BufferLimit = from_yaml("auto").unwrap();
         assert_eq!(bl, BufferLimit::Auto);
+    }
+
+    #[test]
+    fn test_provider_type_response() {
+        static TEST1: &str = "!response";
+
+        let ProviderType::Response {
+            auto_return,
+            buffer,
+            unique,
+        } = from_yaml(TEST1).unwrap() else {
+            panic!("was not response")
+        };
+        assert_eq!(auto_return, None);
+        assert_eq!(buffer, BufferLimit::Auto);
+        assert_eq!(unique, false);
+
+        static TEST2: &str = r#"
+!response
+  buffer: auto
+  auto_return: block
+  unique: true
+        "#;
+
+        let ProviderType::Response {
+            auto_return,
+            buffer,
+            unique,
+        } = from_yaml(TEST2).unwrap() else {
+            panic!("was not response")
+        };
+        assert_eq!(auto_return, Some(ProviderSend::Block));
+        assert_eq!(buffer, BufferLimit::Auto);
+        assert_eq!(unique, true);
+    }
+
+    #[test]
+    fn test_provider_type_other() {
+        // just one quick check on each type
+        // more detailed testing on specific properties should be handled in the dedicated modules
+
+        static TEST_FILE: &str = r##"
+!file
+  path: file.csv
+  repeat: true
+  unique: true
+  auto_return: force
+  buffer: 27
+  format: !csv
+    comment: "#"
+    headers: true"##;
+
+        let ProviderType::File(_) = from_yaml(TEST_FILE).unwrap() else {
+            panic!("was not file provider")
+        };
+
+        static TEST_LIST: &str = r##"
+!list
+  - a
+  - b
+        "##;
+
+        let ProviderType::List(_) = from_yaml(TEST_LIST).unwrap() else {
+            panic!("was not list provider")
+        };
+
+        static TEST_RANGE: &str = r#"
+!range
+  start: 15
+        "#;
+
+        let ProviderType::Range(_) = from_yaml(TEST_RANGE).unwrap() else {
+            panic!("was not range")
+        };
     }
 }
