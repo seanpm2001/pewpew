@@ -1,11 +1,7 @@
 #![allow(dead_code)]
 
-use super::common::Duration;
-use super::OrTemplated;
+use super::common::{Duration, Headers};
 use serde::Deserialize;
-use std::collections::BTreeMap;
-
-pub type Headers = BTreeMap<String, OrTemplated<String>>;
 
 #[derive(Deserialize, Debug, PartialEq, Eq)]
 pub struct Config {
@@ -58,6 +54,7 @@ const fn default_log_provider_stats() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::new_parser::OrTemplated;
     use serde_yaml::from_str as from_yaml;
 
     #[test]
