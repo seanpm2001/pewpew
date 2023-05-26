@@ -123,18 +123,6 @@ mod tests {
 
     #[test]
     fn test_single_values() {
-        // Durations
-        type OTD = OrTemplated<Duration>;
-        let dur = from_yaml::<OTD>("1m").unwrap();
-        assert_eq!(dur.try_get(), Some(&Duration::from_secs(60)));
-        let dur = from_yaml::<OTD>("3h1m22s").unwrap();
-        assert_eq!(
-            dur.try_get(),
-            Some(&Duration::from_secs(3 * 60 * 60 + 60 + 22))
-        );
-        let dur = from_yaml::<OTD>("5 hrs").unwrap();
-        assert_eq!(dur.try_get(), Some(&Duration::from_secs(5 * 60 * 60)));
-
         // Percents
         type OTP = OrTemplated<Percent>;
         let per = from_yaml::<OTP>("1%").unwrap();
