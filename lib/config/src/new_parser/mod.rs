@@ -1,6 +1,7 @@
 pub mod templating;
 pub use templating::OrTemplated;
 
+pub mod config;
 pub mod load_pattern;
 pub mod loggers;
 pub mod providers;
@@ -10,7 +11,7 @@ pub mod common {
     use std::{convert::TryFrom, str::FromStr, time::Duration as SDur};
 
     /// Newtype wrapper around [`std::time::Duration`] that allows implementing the needed traits.
-    #[derive(Debug, Deserialize, PartialEq, Clone, Copy)]
+    #[derive(Debug, Deserialize, PartialEq, Clone, Copy, Eq)]
     #[serde(try_from = "&str")]
     pub struct Duration(SDur);
 
