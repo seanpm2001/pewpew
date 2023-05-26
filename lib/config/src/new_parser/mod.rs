@@ -7,8 +7,11 @@ pub mod loggers;
 pub mod providers;
 
 pub mod common {
+    use super::OrTemplated;
     use serde::Deserialize;
-    use std::{convert::TryFrom, str::FromStr, time::Duration as SDur};
+    use std::{collections::BTreeMap, convert::TryFrom, str::FromStr, time::Duration as SDur};
+
+    pub type Headers = BTreeMap<String, OrTemplated<String>>;
 
     /// Newtype wrapper around [`std::time::Duration`] that allows implementing the needed traits.
     #[derive(Debug, Deserialize, PartialEq, Clone, Copy, Eq)]
