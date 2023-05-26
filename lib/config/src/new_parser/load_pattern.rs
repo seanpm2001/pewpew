@@ -1,3 +1,4 @@
+use super::common::Duration;
 use super::OrTemplated;
 use itertools::Itertools;
 use serde::Deserialize;
@@ -6,9 +7,6 @@ use std::{
     str::FromStr,
 };
 use thiserror::Error;
-
-// For some reason, the derive Deserialize was required on Percent and Duration even though
-// OrTemplated uses its own TryFrom to deserialize.
 
 /// Percentage type used for pewpew config files. Percentages can be zero, greater than 100, or
 /// fractional, but cannot be negatives, nans, or infinities.
@@ -54,21 +52,6 @@ impl FromStr for Percent {
         let base = s.strip_suffix('%').ok_or(NoPercentSign)?;
 
         (base.parse::<f64>()? / 100.0).try_into()
-    }
-}
-
-/// Newtype wrapper around [`std::time::Duration`] that allows implementing the needed traits.
-#[derive(Debug, Deserialize, PartialEq, Clone, Copy)]
-pub struct Duration(::std::time::Duration);
-
-impl FromStr for Duration {
-    // TODO: better error reporting for Duration
-    type Err = &'static str;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        crate::duration_from_string(s.to_owned())
-            .map_err(|_| "invalid duration")
-            .map(Self)
     }
 }
 
@@ -136,7 +119,6 @@ impl LoadPatternTemp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ::std::time::Duration as SDur;
     use serde_yaml::from_str as from_yaml;
 
     #[test]
@@ -144,14 +126,14 @@ mod tests {
         // Durations
         type OTD = OrTemplated<Duration>;
         let dur = from_yaml::<OTD>("1m").unwrap();
-        assert_eq!(dur.try_get(), Some(&Duration(SDur::from_secs(60))));
+        assert_eq!(dur.try_get(), Some(&Duration::from_secs(60)));
         let dur = from_yaml::<OTD>("3h1m22s").unwrap();
         assert_eq!(
             dur.try_get(),
-            Some(&Duration(SDur::from_secs(3 * 60 * 60 + 60 + 22)))
+            Some(&Duration::from_secs(3 * 60 * 60 + 60 + 22))
         );
         let dur = from_yaml::<OTD>("5 hrs").unwrap();
-        assert_eq!(dur.try_get(), Some(&Duration(SDur::from_secs(5 * 60 * 60))));
+        assert_eq!(dur.try_get(), Some(&Duration::from_secs(5 * 60 * 60)));
 
         // Percents
         type OTP = OrTemplated<Percent>;
@@ -209,13 +191,13 @@ mod tests {
             Some(Some(&Percent(0.5)))
         );
         assert_eq!(to.try_get(), Some(&Percent(1.0)));
-        assert_eq!(over.try_get(), Some(&Duration(SDur::from_secs(5 * 60))));
+        assert_eq!(over.try_get(), Some(&Duration::from_secs(5 * 60)));
 
         let LoadPatternTemp::Linear { from, to, over } =
             from_yaml("!linear\n  to: 20%\n  over: 1s").unwrap();
         assert!(matches!(from, None));
         assert_eq!(to.try_get(), Some(&Percent(0.2)));
-        assert_eq!(over.try_get(), Some(&Duration(SDur::from_secs(1))));
+        assert_eq!(over.try_get(), Some(&Duration::from_secs(1)));
     }
 
     #[test]
@@ -232,7 +214,7 @@ mod tests {
         let LoadPatternSingle::Linear { from, to, over } = load.0[0].clone();
         assert_eq!(from.try_get(), Some(&Percent(0.25)));
         assert_eq!(to.try_get(), Some(&Percent(1.0)));
-        assert_eq!(over.try_get(), Some(&Duration(SDur::from_secs(60 * 60))));
+        assert_eq!(over.try_get(), Some(&Duration::from_secs(60 * 60)));
 
         static TEST2: &str = r#"
  - !linear
@@ -245,7 +227,7 @@ mod tests {
         let LoadPatternSingle::Linear { from, to, over } = load[0].clone();
         assert_eq!(from.try_get(), Some(&Percent(0.0)));
         assert_eq!(to.try_get(), Some(&Percent(3.0)));
-        assert_eq!(over.try_get(), Some(&Duration(SDur::from_secs(5 * 60))));
+        assert_eq!(over.try_get(), Some(&Duration::from_secs(5 * 60)));
 
         static TEST3: &str = r#"
  - !linear
@@ -260,11 +242,11 @@ mod tests {
         let LoadPatternSingle::Linear { from, to, over } = load[0].clone();
         assert_eq!(from.try_get(), Some(&Percent(0.0)));
         assert_eq!(to.try_get(), Some(&Percent(0.625)));
-        assert_eq!(over.try_get(), Some(&Duration(SDur::from_secs(59))));
+        assert_eq!(over.try_get(), Some(&Duration::from_secs(59)));
 
         let LoadPatternSingle::Linear { from, to, over } = load[1].clone();
         assert_eq!(from.try_get(), Some(&Percent(0.625)));
         assert_eq!(to.try_get(), Some(&Percent(0.875)));
-        assert_eq!(over.try_get(), Some(&Duration(SDur::from_secs(22))));
+        assert_eq!(over.try_get(), Some(&Duration::from_secs(22)));
     }
 }
