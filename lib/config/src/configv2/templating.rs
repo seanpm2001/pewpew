@@ -64,7 +64,7 @@ impl Template {
 ///
 /// ## Examples
 /// ```
-/// # use config::new_parser::templating::{OrTemplated, FromTemplatedStr};
+/// # use crate::config::configv2::templating::{OrTemplated, FromTemplatedStr};
 /// let x = OrTemplated::<u8>::new_literal(27);
 ///
 /// let y = u8::from_raw_str("${count}").unwrap();
@@ -98,14 +98,14 @@ impl<T: FromTemplatedStr> OrTemplated<T> {
     /// # Examples
     ///
     /// ```
-    /// # use config::new_parser::templating::OrTemplated;
+    /// # use config::configv2::templating::OrTemplated;
     /// // Value is present.
     /// let val = "5".parse::<OrTemplated<u8>>().unwrap();
     /// assert_eq!(val.try_get(), Some(&5));
     /// ```
     ///
     /// ```
-    /// # use config::new_parser::templating::OrTemplated;
+    /// # use config::configv2::templating::OrTemplated;
     /// // Value is not present.
     /// let val = "${count}".parse::<OrTemplated<u8>>().unwrap();
     /// assert_eq!(val.try_get(), None);
@@ -124,7 +124,7 @@ impl<T: FromTemplatedStr> OrTemplated<T> {
     ///
     /// # Examples
     /// ```
-    /// # use config::new_parser::templating::{OrTemplated, TemplateError};
+    /// # use config::configv2::templating::{OrTemplated, TemplateError};
     /// // Value is already present, no need to eval.
     /// let val = OrTemplated::new_literal(5u8);
     /// assert_eq!(val.evaluate(&[].into()), Ok(&5));
@@ -155,7 +155,7 @@ impl<T: FromTemplatedStr> OrTemplated<T> {
     /// # Examples
     ///
     /// ```
-    /// # use config::new_parser::templating::OrTemplated;
+    /// # use config::configv2::templating::OrTemplated;
     /// let val = OrTemplated::new_literal(5u8);
     ///
     /// assert_eq!(val.try_get(), Some(&5));
