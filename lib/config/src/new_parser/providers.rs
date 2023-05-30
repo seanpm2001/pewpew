@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use super::common::ProviderSend;
 use super::OrTemplated;
 use serde::Deserialize;
 
@@ -20,14 +21,6 @@ enum ProviderType {
     },
     List(list::ListProvider),
     Range(range::RangeProvider),
-}
-
-#[derive(Debug, Deserialize, PartialEq, Eq, Clone, Copy)]
-#[serde(rename_all = "snake_case")]
-enum ProviderSend {
-    Block,
-    Force,
-    IfNotFull,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq, Default, Clone, Copy)]
@@ -70,14 +63,6 @@ mod tests {
 
     #[test]
     fn test_basic_types() {
-        // provider send
-        let ps: ProviderSend = from_yaml("!block").unwrap();
-        assert_eq!(ps, ProviderSend::Block);
-        let ps: ProviderSend = from_yaml("!force").unwrap();
-        assert_eq!(ps, ProviderSend::Force);
-        let ps: ProviderSend = from_yaml("!if_not_full").unwrap();
-        assert_eq!(ps, ProviderSend::IfNotFull);
-
         // buffer limit
         let bl: BufferLimit = from_yaml("43").unwrap();
         assert_eq!(bl, BufferLimit::Limit(43));
