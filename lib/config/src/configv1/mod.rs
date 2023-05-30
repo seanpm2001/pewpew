@@ -2361,26 +2361,16 @@ struct PreHitsPer(PreTemplate);
 
 impl PreHitsPer {
     fn evaluate(&self, static_vars: &BTreeMap<String, json::Value>) -> Result<HitsPer, Error> {
+        use crate::shared::Per;
         let string = self
             .0
             .evaluate(static_vars, &mut RequiredProviders::new())?;
-        let re = Regex::new(r"^(?i)(\d+(?:\.\d+)?)\s*hp([ms])$").expect("should be a valid regex");
-        let captures = re
-            .captures(&string)
+        let (n, tag) = crate::shared::get_hits_per(&string)
             .ok_or_else(|| Error::InvalidPeakLoad(string.clone(), (self.0).0.marker))?;
-        let n = captures
-            .get(1)
-            .expect("should have capture group")
-            .as_str()
-            .parse()
-            .expect("should be valid digits for HitsPer");
-        if captures.get(2).expect("should have capture group").as_str()[0..1]
-            .eq_ignore_ascii_case("m")
-        {
-            Ok(HitsPer::Minute(n))
-        } else {
-            Ok(HitsPer::Second(n))
-        }
+        Ok(match tag {
+            Per::Minute => HitsPer::Minute,
+            Per::Second => HitsPer::Second,
+        }(n as f32))
     }
 }
 
