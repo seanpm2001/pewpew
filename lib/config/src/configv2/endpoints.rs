@@ -6,8 +6,6 @@ use super::{
     OrTemplated,
 };
 use derive_more::{Deref, FromStr};
-use once_cell::sync::Lazy;
-use regex::Regex;
 use serde::Deserialize;
 use std::{
     collections::{BTreeMap, HashMap},
@@ -84,25 +82,14 @@ impl FromStr for HitsPerMinute {
     type Err = &'static str;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        static REGEX: Lazy<Regex> = Lazy::new(|| {
-            Regex::new(r"^(?i)(\d+(?:\.\d+)?)\s*hp([ms])$").expect("should be a valid regex")
-        });
-        let captures = REGEX.captures(s).ok_or("invalid")?;
-        // None of this should ever panic due to how the regex is formed.
-        let [n, tag] = (1..=2)
-            .map(|i| captures.get(i).unwrap().as_str())
-            .collect::<Vec<_>>()[..] else {
-                unreachable!()
-            };
-
-        let n: f64 = n.parse().unwrap();
+        use crate::shared::Per;
+        let (n, tag) = crate::shared::get_hits_per(s).ok_or("invalid")?;
         // Highly doubt anyone will do this, but you never know.
         let n = n.is_finite().then_some(n).ok_or("hits per is too big")?;
         Ok(Self(
             n * match tag {
-                "m" | "M" => 1.0,
-                "s" | "S" => 60.0,
-                _ => unreachable!("regex should only catch 'h' or 'm'"),
+                Per::Minute => 1.0,
+                Per::Second => 60.0,
             },
         ))
     }

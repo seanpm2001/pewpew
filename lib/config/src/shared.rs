@@ -41,3 +41,32 @@ pub(crate) fn duration_from_string(dur: &str) -> Option<Duration> {
         })
         .map(Duration::from_secs)
 }
+
+pub enum Per {
+    Minute,
+    Second,
+}
+
+/// Returns the value, and period of that value, based on the input string.
+pub(crate) fn get_hits_per(s: &str) -> Option<(f64, Per)> {
+    static REGEX: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"^(?i)(\d+(?:\.\d+)?)\s*hp([ms])$").expect("should be a valid regex")
+    });
+    let captures = REGEX.captures(s)?;
+    // None of this should ever panic due to how the regex is formed.
+    let [n, tag] = (1..=2)
+            .map(|i| captures.get(i).unwrap().as_str())
+            .collect::<Vec<_>>()[..] else {
+                unreachable!()
+            };
+
+    let n: f64 = n.parse().unwrap();
+    Some((
+        n,
+        match &tag[0..1] {
+            "m" | "M" => Per::Minute,
+            "s" | "S" => Per::Second,
+            _ => unreachable!("regex should only catch 'h' or 'm'"),
+        },
+    ))
+}
