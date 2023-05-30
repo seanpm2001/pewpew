@@ -1159,7 +1159,7 @@ pub const REQUEST_URL: u16 = 0b01_0000_0000;
 pub const ERROR: u16 = 0b10_0000_0000;
 
 #[derive(Parser)]
-#[grammar = "select.pest"]
+#[grammar = "configv1/select.pest"]
 struct Parser;
 
 #[derive(Clone, Debug)]
