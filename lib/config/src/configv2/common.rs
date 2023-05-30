@@ -14,9 +14,9 @@ impl FromStr for Duration {
     type Err = &'static str;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        crate::duration_from_string(s.to_owned())
-            .map_err(|_| "invalid duration")
+        crate::shared::duration_from_string(s)
             .map(Self)
+            .ok_or("invalid duration")
     }
 }
 

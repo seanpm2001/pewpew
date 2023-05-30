@@ -2254,33 +2254,7 @@ pub fn duration_from_string(dur: String) -> Result<Duration, Error> {
 }
 
 fn duration_from_string2(dur: String, marker: Marker) -> Result<Duration, Error> {
-    let base_re = r"(?i)(\d+)\s*(d|h|m|s|days?|hrs?|mins?|secs?|hours?|minutes?|seconds?)";
-    let sanity_re = Regex::new(&format!(r"^(?:{base_re}\s*)+$")).expect("should be a valid regex");
-    if !sanity_re.is_match(&dur) {
-        return Err(Error::InvalidDuration(dur, marker));
-    }
-    let mut total_secs = 0;
-    let re = Regex::new(base_re).expect("should be a valid regex");
-    for captures in re.captures_iter(&dur) {
-        let n: u64 = captures
-            .get(1)
-            .expect("should have capture group")
-            .as_str()
-            .parse()
-            .expect("should parse into u64 for duration");
-        let unit = &captures.get(2).expect("should have capture group").as_str()[0..1];
-        let secs = if unit.eq_ignore_ascii_case("d") {
-            n * 60 * 60 * 24 // days
-        } else if unit.eq_ignore_ascii_case("h") {
-            n * 60 * 60 // hours
-        } else if unit.eq_ignore_ascii_case("m") {
-            n * 60 // minutes
-        } else {
-            n // seconds
-        };
-        total_secs += secs;
-    }
-    Ok(Duration::from_secs(total_secs))
+    crate::shared::duration_from_string(&dur).ok_or_else(|| Error::InvalidDuration(dur, marker))
 }
 
 #[cfg_attr(debug_assertions, derive(PartialEq))]
