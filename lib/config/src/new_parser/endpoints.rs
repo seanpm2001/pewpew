@@ -15,7 +15,7 @@ use std::{
     str::FromStr,
 };
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct Endpoint {
     #[serde(default)]
     declare: BTreeMap<String, String>, // expressions are still Strings for now

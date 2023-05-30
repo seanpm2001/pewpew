@@ -6,7 +6,7 @@ use serde::Deserialize;
 
 // TODO: handle the queries better.
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct Logger {
     select: Option<String>,
     for_each: Option<String>,

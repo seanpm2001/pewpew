@@ -10,7 +10,7 @@ mod range;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum ProviderType {
+pub enum ProviderType {
     File(file::FileProvider),
     Response {
         auto_return: Option<ProviderSend>,
@@ -25,7 +25,7 @@ enum ProviderType {
 
 #[derive(Debug, Deserialize, PartialEq, Eq, Default, Clone, Copy)]
 #[serde(from = "BufferLimitTmp")]
-enum BufferLimit {
+pub enum BufferLimit {
     Limit(u64),
     #[default]
     Auto,
