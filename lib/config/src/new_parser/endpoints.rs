@@ -5,6 +5,7 @@ use super::{
     load_pattern::LoadPattern,
     OrTemplated,
 };
+use derive_more::{Deref, FromStr};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::Deserialize;
@@ -16,22 +17,42 @@ use std::{
 
 #[derive(Deserialize)]
 pub struct Endpoint {
-    declare: Option<()>,
+    #[serde(default)]
+    declare: BTreeMap<String, String>, // expressions are still Strings for now
+    #[serde(default)]
     headers: Headers,
-    body: EndPointBody,
-    load_pattern: LoadPattern,
-    method: (),
-    peak_load: OrTemplated<HitsPerMinute>,
+    body: Option<EndPointBody>,
+    load_pattern: Option<LoadPattern>,
+    #[serde(default)]
+    method: Method,
+    peak_load: Option<OrTemplated<HitsPerMinute>>,
     #[serde(default)]
     tags: BTreeMap<String, OrTemplated<String>>,
     url: OrTemplated<String>,
-    provides: (),
-    on_demand: bool,
-    logs: (),
+    #[serde(default)]
+    provides: BTreeMap<String, EndpointProvides>,
+    // book says optional, check what the behavior should be and if this
+    // should default
+    on_demand: Option<bool>,
+    #[serde(default)]
+    logs: BTreeMap<String, EndpointLogs>,
     max_parallel_requests: Option<u64>,
     #[serde(default)]
     no_auto_returns: bool,
     request_timeout: Option<Duration>,
+}
+
+/// Newtype wrapper around [`http::Method`] for implementing [`serde::Deserialize`].
+#[derive(Deserialize, Debug, Default, Deref, FromStr, PartialEq, Eq)]
+#[serde(try_from = "&str")]
+struct Method(http::Method);
+
+impl TryFrom<&str> for Method {
+    type Error = <Self as FromStr>::Err;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        value.parse()
+    }
 }
 
 // maybe make this one a Tmp, and the real one just has three tuple variants
@@ -55,7 +76,7 @@ struct MultiPartBodySection {
     body: EndPointBody,
 }
 
-#[derive(Debug, Deserialize, PartialEq, PartialOrd)]
+#[derive(Debug, Deserialize, PartialEq, PartialOrd, Deref)]
 #[serde(try_from = "&str")]
 struct HitsPerMinute(f64);
 
@@ -93,6 +114,21 @@ impl TryFrom<&str> for HitsPerMinute {
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         value.parse()
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct EndpointProvides {
+    select: String, // Expressions are Strings for now
+    for_each: String,
+    r#where: String,
+    send: super::common::ProviderSend,
+}
+
+#[derive(Debug, Deserialize)]
+struct EndpointLogs {
+    select: String, // Expressions are Strings for now
+    for_each: String,
+    r#where: String,
 }
 
 #[cfg(test)]
@@ -164,5 +200,71 @@ multipart:
                 body: EndPointBody::Template(OrTemplated::new_literal("some text".to_owned()))
             }
         );
+    }
+
+    #[test]
+    fn test_method_default() {
+        // The Default impl for the local Method is forwarded to http::Method::default()
+        // in current version, that default is GET. This test is to check if that changes between
+        // versions.
+        assert_eq!(Method::default(), Method(http::Method::GET));
+    }
+
+    #[test]
+    fn test_method() {
+        // The pewpew book does not specify a valid subset, so assuming all should be tested.
+        let Method(method) = from_yaml("GET").unwrap();
+        assert_eq!(method, http::Method::GET);
+        let Method(method) = from_yaml("CONNECT").unwrap();
+        assert_eq!(method, http::Method::CONNECT);
+        let Method(method) = from_yaml("DELETE").unwrap();
+        assert_eq!(method, http::Method::DELETE);
+        let Method(method) = from_yaml("HEAD").unwrap();
+        assert_eq!(method, http::Method::HEAD);
+        let Method(method) = from_yaml("OPTIONS").unwrap();
+        assert_eq!(method, http::Method::OPTIONS);
+        let Method(method) = from_yaml("PATCH").unwrap();
+        assert_eq!(method, http::Method::PATCH);
+        let Method(method) = from_yaml("POST").unwrap();
+        assert_eq!(method, http::Method::POST);
+        let Method(method) = from_yaml("PUT").unwrap();
+        assert_eq!(method, http::Method::PUT);
+        let Method(method) = from_yaml("TRACE").unwrap();
+        assert_eq!(method, http::Method::TRACE);
+    }
+
+    #[test]
+    fn test_endpoint() {
+        static TEST: &str = r#"url: example.com"#;
+        let Endpoint {
+            declare,
+            headers,
+            body,
+            load_pattern,
+            method,
+            peak_load,
+            tags,
+            url,
+            provides,
+            on_demand,
+            logs,
+            max_parallel_requests,
+            no_auto_returns,
+            request_timeout,
+        } = from_yaml(TEST).unwrap();
+        assert!(declare.is_empty());
+        assert!(headers.is_empty());
+        assert_eq!(body, None);
+        assert_eq!(load_pattern, None);
+        assert_eq!(*method, http::Method::GET);
+        assert_eq!(peak_load, None);
+        assert!(tags.is_empty());
+        assert_eq!(url, OrTemplated::new_literal("example.com".to_owned()));
+        assert!(provides.is_empty());
+        assert_eq!(on_demand, None);
+        assert!(logs.is_empty());
+        assert_eq!(max_parallel_requests, None);
+        assert_eq!(no_auto_returns, false);
+        assert_eq!(request_timeout, None);
     }
 }
