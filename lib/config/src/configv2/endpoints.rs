@@ -100,8 +100,8 @@ impl FromStr for HitsPerMinute {
         let n = n.is_finite().then_some(n).ok_or("hits per is too big")?;
         Ok(Self(
             n * match tag {
-                "m" => 1.0,
-                "s" => 60.0,
+                "m" | "M" => 1.0,
+                "s" | "S" => 60.0,
                 _ => unreachable!("regex should only catch 'h' or 'm'"),
             },
         ))
