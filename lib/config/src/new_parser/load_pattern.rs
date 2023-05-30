@@ -56,7 +56,7 @@ impl FromStr for Percent {
 }
 
 /// Defines the load pattern of how heavily pewpew should be hitting the endpoints over time.
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, PartialEq)]
 #[serde(from = "Vec<LoadPatternTemp>")]
 pub struct LoadPattern(Vec<LoadPatternSingle>);
 
@@ -87,7 +87,7 @@ impl From<Vec<LoadPatternTemp>> for LoadPattern {
 }
 
 /// Single segment of a [`LoadPattern`], defining the shape and duration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum LoadPatternSingle {
     Linear {
         from: OrTemplated<Percent>,
