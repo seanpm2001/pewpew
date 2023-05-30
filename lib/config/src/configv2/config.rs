@@ -54,7 +54,7 @@ const fn default_log_provider_stats() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::new_parser::OrTemplated;
+    use crate::configv2::OrTemplated;
     use serde_yaml::from_str as from_yaml;
 
     #[test]
