@@ -1176,14 +1176,14 @@ pub const ERROR: u16 = 0b10_0000_0000;
 struct Parser;
 
 #[derive(Clone, Debug)]
-enum TemplatePiece {
-    Expression(ValueOrExpression),
+enum TemplatePiece<B: AllowMarkers = True> {
+    Expression(ValueOrExpression<B>),
     NotExpression(String),
 }
 
 #[derive(Clone, Debug)]
-pub struct Template {
-    pieces: Vec<TemplatePiece>,
+pub struct Template<B: AllowMarkers = True> {
+    pieces: Vec<TemplatePiece<B>>,
     size_hint: usize,
     no_recoverable_error: bool,
 }
