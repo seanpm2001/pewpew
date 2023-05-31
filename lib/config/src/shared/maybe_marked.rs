@@ -16,6 +16,7 @@ use derivative::Derivative;
 use std::{
     fmt::{self, Display},
     hint::unreachable_unchecked,
+    ops::Deref,
 };
 use yaml_rust::scanner::Marker;
 
@@ -23,7 +24,7 @@ pub(crate) trait AllowMarkers: Copy {
     type Inverse: AllowMarkers;
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct True;
 
 impl AllowMarkers for True {
@@ -157,7 +158,7 @@ where
         match &self.0 {
             MaybeMarkedInner::Marked { value, marker, .. } => write!(
                 f,
-                "{} at line: {}, col: {}",
+                "{} at line {} col {}",
                 value,
                 marker.line(),
                 marker.col()
@@ -173,5 +174,13 @@ where
 {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         self.get().source()
+    }
+}
+
+impl<T, B: AllowMarkers> Deref for MaybeMarked<T, B> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        self.get()
     }
 }
