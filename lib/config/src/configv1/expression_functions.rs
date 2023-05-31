@@ -3,6 +3,7 @@ use super::select_parser::{bool_value, f64_value, RequiredProviders, Value, Valu
 use crate::error::{CreatingExpressionError, ExecutingExpressionError};
 use crate::json_value_to_string;
 use crate::select_parser::ProviderStream;
+use crate::shared::maybe_marked::{AllowMarkers, True};
 
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine};
 use ether::{Either, Either3, EitherExt};
@@ -1585,8 +1586,8 @@ impl Replace {
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct ParseNum {
-    arg: ValueOrExpression,
+pub(super) struct ParseNum<B: AllowMarkers = True> {
+    arg: ValueOrExpression<B>,
     is_float: bool,
 }
 

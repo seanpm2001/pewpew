@@ -2,7 +2,7 @@ use crate::expression_functions::{
     Collect, Encode, Entries, Epoch, If, Join, JsonPath, Match, MinMax, Pad, ParseNum, Random,
     Range, Repeat, Replace,
 };
-use crate::shared::maybe_marked::{MaybeMarked, True};
+use crate::shared::maybe_marked::{AllowMarkers, MaybeMarked, True};
 use crate::{
     create_marker, json_value_to_string, EndpointProvidesPreProcessed, EndpointProvidesSendOptions,
     WithMarker,
@@ -631,8 +631,8 @@ pub(super) fn f64_value(json: &json::Value) -> f64 {
 }
 
 #[derive(Clone, Debug)]
-pub enum ValueOrExpression {
-    Value(Value),
+pub enum ValueOrExpression<B: AllowMarkers = True> {
+    Value(Value<B>),
     Expression(Expression),
 }
 
@@ -712,8 +712,8 @@ impl ValueOrExpression {
 }
 
 #[derive(Clone, Debug)]
-pub enum Value {
-    Path(Box<MaybeMarked<Path, True>>),
+pub enum Value<B: AllowMarkers = True> {
+    Path(Box<MaybeMarked<Path, B>>),
     Json(json::Value),
     Template(Template),
 }
