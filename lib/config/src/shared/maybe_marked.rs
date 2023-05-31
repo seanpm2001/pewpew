@@ -20,19 +20,19 @@ use std::{
 };
 use yaml_rust::scanner::Marker;
 
-pub(crate) trait AllowMarkers: Copy {
+pub trait AllowMarkers: Copy {
     type Inverse: AllowMarkers;
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct True;
+pub struct True;
 
 impl AllowMarkers for True {
     type Inverse = False;
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum False {}
+pub enum False {}
 
 impl AllowMarkers for False {
     type Inverse = True;
@@ -47,7 +47,7 @@ impl AllowMarkers for False {
 //}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct MaybeMarked<T, B: AllowMarkers = False>(MaybeMarkedInner<T, B>);
+pub struct MaybeMarked<T, B: AllowMarkers = False>(MaybeMarkedInner<T, B>);
 
 // The __dontuse property of each variant prevents that variant from being constructed if the type
 // is False. For example, MaybeMarkedInner<T, True> cannot be an Unmarked variant, because that
