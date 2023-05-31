@@ -1685,6 +1685,8 @@ impl ParseNum {
 
 #[cfg(test)]
 mod tests {
+    use crate::shared::maybe_marked::MaybeMarked;
+
     use super::super::{
         create_marker,
         select_parser::{Path, PathStart},
@@ -1727,11 +1729,13 @@ mod tests {
         fn from(s: &str) -> Self {
             let marker = create_marker();
             ValueOrExpression::Value(Value::Path(
-                Path {
-                    start: PathStart::Ident(s.into()),
-                    rest: vec![],
+                MaybeMarked::new_marked(
+                    Path {
+                        start: PathStart::Ident(s.into()),
+                        rest: vec![],
+                    },
                     marker,
-                }
+                )
                 .into(),
             ))
         }

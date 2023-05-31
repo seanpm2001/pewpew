@@ -2,6 +2,7 @@ use crate::expression_functions::{
     Collect, Encode, Entries, Epoch, If, Join, JsonPath, Match, MinMax, Pad, ParseNum, Random,
     Range, Repeat, Replace,
 };
+use crate::shared::maybe_marked::{MaybeMarked, True};
 use crate::{
     create_marker, json_value_to_string, EndpointProvidesPreProcessed, EndpointProvidesSendOptions,
     WithMarker,
@@ -444,10 +445,9 @@ fn index_json2<'a>(
 pub struct Path {
     pub(super) start: PathStart,
     pub(super) rest: Vec<PathSegment>,
-    pub(super) marker: Marker,
 }
 
-impl Path {
+impl MaybeMarked<Path, True> {
     fn evaluate<'a, 'b: 'a>(
         &'b self,
         d: Cow<'a, json::Value>,
@@ -478,12 +478,18 @@ impl Path {
                 }
             }
             (PathStart::Ident(s), _) => (
-                index_json(d, Either::B(s), no_recoverable_error, for_each, self.marker)?,
+                index_json(
+                    d,
+                    Either::B(s),
+                    no_recoverable_error,
+                    for_each,
+                    *self.get_marker(),
+                )?,
                 self.rest.as_slice(),
             ),
             (PathStart::Value(v), _) => (Cow::Borrowed(v), self.rest.as_slice()),
         };
-        index_json2(v, rest, no_recoverable_error, for_each, self.marker)
+        index_json2(v, rest, no_recoverable_error, for_each, *self.get_marker())
     }
 
     fn evaluate_as_iter<'a, 'b: 'a>(
@@ -508,7 +514,7 @@ impl Path {
                 Either::A(
                     fnc.evaluate_as_iter(d, no_recoverable_error, for_each)?
                         .map(move |j| {
-                            index_json2(j, &rest, no_recoverable_error, None, self.marker)
+                            index_json2(j, &rest, no_recoverable_error, None, *self.get_marker())
                         }),
                 )
             }
@@ -526,7 +532,13 @@ impl Path {
                     }
                 } else {
                     (
-                        index_json(d, Either::B(s), no_recoverable_error, for_each, self.marker)?,
+                        index_json(
+                            d,
+                            Either::B(s),
+                            no_recoverable_error,
+                            for_each,
+                            *self.get_marker(),
+                        )?,
                         self.rest.as_slice(),
                     )
                 };
@@ -535,7 +547,7 @@ impl Path {
                     rest,
                     no_recoverable_error,
                     for_each,
-                    self.marker,
+                    *self.get_marker(),
                 )?)))
             }
             PathStart::Value(v) => Either::B(iter::once(Ok(Cow::Borrowed(v)))),
@@ -557,10 +569,11 @@ impl Path {
             providers.keys(),
             no_recoverable_error
         );
+        let marker = *self.get_marker();
+        let p = self.into_inner();
         // TODO: don't we need providers when evaluating `rest`?
-        let rest = self.rest;
-        let marker = self.marker;
-        match self.start {
+        let rest = p.rest;
+        match p.start {
             PathStart::FunctionCall(fnc) => fnc
                 .into_stream(providers, no_recoverable_error)
                 .map(move |r| {
@@ -700,7 +713,7 @@ impl ValueOrExpression {
 
 #[derive(Clone, Debug)]
 pub enum Value {
-    Path(Box<Path>),
+    Path(Box<MaybeMarked<Path, True>>),
     Json(json::Value),
     Template(Template),
 }
@@ -1746,7 +1759,7 @@ fn parse_path(
     static_vars: &BTreeMap<String, json::Value>,
     no_recoverable_error: bool,
     marker: Marker,
-) -> Result<Either<json::Value, Path>, CreatingExpressionError> {
+) -> Result<Either<json::Value, MaybeMarked<Path, True>>, CreatingExpressionError> {
     log::trace!(
         "parse_path pair: {}, providers: {:?}, no_recoverable_error: {}, marker: {:?}",
         pair,
@@ -1823,11 +1836,8 @@ fn parse_path(
             }
         };
     }
-    let p = Path {
-        start,
-        rest,
-        marker,
-    };
+    let p = Path { start, rest };
+    let p = MaybeMarked::new_marked(p, marker);
     log::trace!("parse_path path: {:?}", p);
     let r = match p.start {
         PathStart::Value(_) if providers2.is_empty() => {
