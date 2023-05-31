@@ -1,5 +1,6 @@
 use std::{error::Error as StdError, fmt};
 
+use crate::shared::maybe_marked::{MaybeMarked, True, MM};
 use serde_json as json;
 use yaml_rust::scanner::{Marker, ScanError};
 
@@ -7,16 +8,16 @@ type PestError = pest::error::Error<crate::select_parser::Rule>;
 
 #[derive(Clone, Debug)]
 pub enum ExecutingExpressionError {
-    IndexingIntoJson(String, json::Value, Marker),
-    InvalidFunctionArguments(&'static str, Marker),
+    IndexingIntoJson(String, json::Value),
+    InvalidFunctionArguments(&'static str),
 }
 
 #[derive(Clone, Debug)]
 pub enum CreatingExpressionError {
     Executing(ExecutingExpressionError),
-    InvalidExpression(PestError, Marker),
-    UnknownFunction(String, Marker),
-    UnknownProvider(String, Marker),
+    InvalidExpression(PestError),
+    UnknownFunction(String),
+    UnknownProvider(String),
 }
 
 impl From<ExecutingExpressionError> for CreatingExpressionError {
@@ -25,9 +26,9 @@ impl From<ExecutingExpressionError> for CreatingExpressionError {
     }
 }
 
-impl From<ExecutingExpressionError> for Error {
-    fn from(e: ExecutingExpressionError) -> Self {
-        CreatingExpressionError::Executing(e).into()
+impl From<MM<ExecutingExpressionError, True>> for Error {
+    fn from(e: MM<ExecutingExpressionError, True>) -> Self {
+        e.map_value(CreatingExpressionError::Executing).into()
     }
 }
 
@@ -45,7 +46,7 @@ impl From<ExecutingExpressionError> for Error {
 
 #[derive(Clone, Debug)]
 pub enum Error {
-    ExpressionErr(CreatingExpressionError),
+    ExpressionErr(MaybeMarked<CreatingExpressionError, True>),
     InvalidDuration(String, Marker),
     InvalidLoadPattern(Marker),
     InvalidPeakLoad(String, Marker),
@@ -88,28 +89,10 @@ impl fmt::Display for CreatingExpressionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use CreatingExpressionError::*;
         match self {
-            InvalidExpression(e, m) => write!(
-                f,
-                "invalid expression. {:?} at line {} column {}",
-                e,
-                m.line(),
-                m.col()
-            ),
+            InvalidExpression(e) => write!(f, "invalid expression. {:?}", e,),
             Executing(e) => e.fmt(f),
-            UnknownFunction(func, m) => write!(
-                f,
-                "unknown function `{}` at line {} column {}",
-                func,
-                m.line(),
-                m.col()
-            ),
-            UnknownProvider(p, m) => write!(
-                f,
-                "unknown provider: `{}` at line {} column {}",
-                p,
-                m.line(),
-                m.col()
-            ),
+            UnknownFunction(func) => write!(f, "unknown function `{}`", func,),
+            UnknownProvider(p) => write!(f, "unknown provider: `{}`", p,),
         }
     }
 }
@@ -118,20 +101,10 @@ impl fmt::Display for ExecutingExpressionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use ExecutingExpressionError::*;
         match self {
-            IndexingIntoJson(p, _, m) => write!(
-                f,
-                "indexing into json. Path was `{}` at line {} column {}",
-                p,
-                m.line(),
-                m.col()
-            ),
-            InvalidFunctionArguments(func, m) => write!(
-                f,
-                "invalid arguments for function `{}` at line {} column {}",
-                func,
-                m.line(),
-                m.col()
-            ),
+            IndexingIntoJson(p, _) => write!(f, "indexing into json. Path was `{}`", p),
+            InvalidFunctionArguments(func) => {
+                write!(f, "invalid arguments for function `{}`", func)
+            }
         }
     }
 }
@@ -167,7 +140,7 @@ impl fmt::Display for Error {
 impl StdError for CreatingExpressionError {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
         match self {
-            CreatingExpressionError::InvalidExpression(e, _) => Some(e),
+            CreatingExpressionError::InvalidExpression(e) => Some(e),
             _ => None,
         }
     }
@@ -183,8 +156,8 @@ impl StdError for Error {
     }
 }
 
-impl From<CreatingExpressionError> for Error {
-    fn from(ee: CreatingExpressionError) -> Self {
+impl From<MM<CreatingExpressionError, True>> for Error {
+    fn from(ee: MM<CreatingExpressionError, True>) -> Self {
         Error::ExpressionErr(ee)
     }
 }

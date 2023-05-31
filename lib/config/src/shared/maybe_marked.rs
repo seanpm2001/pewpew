@@ -20,6 +20,8 @@ use std::{
 };
 use yaml_rust::scanner::Marker;
 
+pub type MM<T, B> = MaybeMarked<T, B>;
+
 pub trait AllowMarkers: Copy {
     type Inverse: AllowMarkers;
 }
@@ -146,6 +148,29 @@ impl<T, B: AllowMarkers> MaybeMarked<T, B> {
         match &self.0 {
             MaybeMarkedInner::Unmarked { .. } => None,
             MaybeMarkedInner::Marked { marker, .. } => Some(marker),
+        }
+    }
+
+    pub(crate) fn map_value<U, F>(self, f: F) -> MaybeMarked<U, B>
+    where
+        F: FnOnce(T) -> U,
+    {
+        match self.0 {
+            MaybeMarkedInner::Marked {
+                value,
+                marker,
+                __dontuse,
+            } => MaybeMarked(MaybeMarkedInner::Marked {
+                value: f(value),
+                marker,
+                __dontuse,
+            }),
+            MaybeMarkedInner::Unmarked { value, __dontuse } => {
+                MaybeMarked(MaybeMarkedInner::Unmarked {
+                    value: f(value),
+                    __dontuse,
+                })
+            }
         }
     }
 }
