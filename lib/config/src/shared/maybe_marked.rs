@@ -13,7 +13,10 @@
 //! be gotten rid of as well, and just use a `T` instead of a `MaybeMarked<T, False>`
 
 use derivative::Derivative;
-use std::hint::unreachable_unchecked;
+use std::{
+    fmt::{self, Display},
+    hint::unreachable_unchecked,
+};
 use yaml_rust::scanner::Marker;
 
 pub(crate) trait AllowMarkers: Copy {
@@ -42,23 +45,26 @@ impl AllowMarkers for False {
 //    type Inverse = Either;
 //}
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MaybeMarked<T, B: AllowMarkers = False>(MaybeMarkedInner<T, B>);
 
 // The __dontuse property of each variant prevents that variant from being constructed if the type
 // is False. For example, MaybeMarkedInner<T, True> cannot be an Unmarked variant, because that
 // requires a value of type True::Inverse, which is False, which has no values.
-#[derive(Derivative)]
-#[derivative(Debug)]
+#[derive(Derivative, Clone, Copy)]
+#[derivative(Debug, PartialEq, Eq)]
 enum MaybeMarkedInner<T, B: AllowMarkers> {
     Marked {
         value: T,
         marker: Marker,
+        #[derivative(PartialEq = "ignore")]
         #[derivative(Debug = "ignore")]
         __dontuse: B,
     },
     Unmarked {
         value: T,
         #[derivative(Debug = "ignore")]
+        #[derivative(PartialEq = "ignore")]
         __dontuse: B::Inverse,
     },
 }
@@ -140,5 +146,32 @@ impl<T, B: AllowMarkers> MaybeMarked<T, B> {
             MaybeMarkedInner::Unmarked { .. } => None,
             MaybeMarkedInner::Marked { marker, .. } => Some(marker),
         }
+    }
+}
+
+impl<T, B: AllowMarkers> Display for MaybeMarked<T, B>
+where
+    T: Display,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.0 {
+            MaybeMarkedInner::Marked { value, marker, .. } => write!(
+                f,
+                "{} at line: {}, col: {}",
+                value,
+                marker.line(),
+                marker.col()
+            ),
+            MaybeMarkedInner::Unmarked { value, .. } => write!(f, "{value}"),
+        }
+    }
+}
+
+impl<T: std::error::Error, B: AllowMarkers> std::error::Error for MaybeMarked<T, B>
+where
+    Self: Display + fmt::Debug,
+{
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.get().source()
     }
 }
