@@ -104,7 +104,7 @@ impl<T> MaybeMarked<T, False> {
     }
 
     /// Inserts the marker and "markedness" from `other` into self
-    pub(crate) fn zip<B: AllowMarkers, U>(self, other: &MaybeMarked<U, B>) -> MaybeMarked<T, B> {
+    pub fn zip<B: AllowMarkers, U>(self, other: &MaybeMarked<U, B>) -> MaybeMarked<T, B> {
         match other.0 {
             MaybeMarkedInner::Marked {
                 marker, __dontuse, ..
@@ -130,7 +130,7 @@ impl<T> From<T> for MaybeMarked<T, False> {
 }
 
 impl<T, B: AllowMarkers> MaybeMarked<T, B> {
-    pub(crate) fn get(&self) -> &T {
+    pub fn get(&self) -> &T {
         match &self.0 {
             MaybeMarkedInner::Unmarked { value, .. } => value,
             MaybeMarkedInner::Marked { value, .. } => value,
@@ -151,7 +151,36 @@ impl<T, B: AllowMarkers> MaybeMarked<T, B> {
         }
     }
 
-    pub(crate) fn map_value<U, F>(self, f: F) -> MaybeMarked<U, B>
+    pub(crate) fn as_marker(&self) -> MaybeMarked<(), B> {
+        self.as_ref().map_value(|_| ())
+    }
+
+    pub(crate) fn as_ref(&self) -> MaybeMarked<&T, B> {
+        match &self.0 {
+            MaybeMarkedInner::Marked {
+                value,
+                marker,
+                __dontuse,
+            } => MaybeMarked(MaybeMarkedInner::Marked {
+                value,
+                marker: *marker,
+                __dontuse: *__dontuse,
+            }),
+            MaybeMarkedInner::Unmarked { value, __dontuse } => {
+                MaybeMarked(MaybeMarkedInner::Unmarked {
+                    value,
+                    __dontuse: *__dontuse,
+                })
+            }
+        }
+    }
+
+    pub fn extract(self) -> (T, MaybeMarked<(), B>) {
+        let marker = self.as_marker();
+        (self.into_inner(), marker)
+    }
+
+    pub fn map_value<U, F>(self, f: F) -> MaybeMarked<U, B>
     where
         F: FnOnce(T) -> U,
     {
@@ -172,6 +201,13 @@ impl<T, B: AllowMarkers> MaybeMarked<T, B> {
                 })
             }
         }
+    }
+
+    pub(crate) fn map_into<U>(self) -> MaybeMarked<U, B>
+    where
+        U: From<T>,
+    {
+        self.map_value(From::from)
     }
 }
 

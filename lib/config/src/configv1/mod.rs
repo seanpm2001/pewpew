@@ -36,6 +36,8 @@ use std::{
     time::Duration,
 };
 
+use crate::shared::maybe_marked::MaybeMarked;
+
 fn map_yaml_deserialize_err(name: String) -> impl FnOnce(Error) -> Error {
     |mut err| {
         if let Error::YamlDeserialize(ref mut o @ None, _)
@@ -2210,10 +2212,16 @@ impl PreVar {
                         Template::new(s, env_vars, &mut RequiredProviders::new(), false, marker)?;
                     let s = match t.evaluate(Cow::Owned(json::Value::Null), None) {
                         Ok(s) => s,
-                        Err(ExecutingExpressionError::IndexingIntoJson(s, _, marker)) => {
-                            return Err(Error::MissingEnvironmentVariable(s, marker))
+                        Err(e) => {
+                            let &marker = e.get_marker();
+                            let e = e.into_inner();
+                            match e {
+                                ExecutingExpressionError::IndexingIntoJson(s, _) => {
+                                    return Err(Error::MissingEnvironmentVariable(s, marker))
+                                }
+                                _ => return Err(MaybeMarked::new_marked(e, marker).into()),
+                            }
                         }
-                        Err(e) => return Err(e.into()),
                     };
                     *v = json::from_str(&s).unwrap_or(json::Value::String(s));
                 }
@@ -2950,7 +2958,10 @@ impl LoadTest {
         mut providers: I,
     ) -> Result<(), Error> {
         if let Some((p, marker)) = providers.find(|(p, _)| !self.providers.contains_key(*p)) {
-            let e = CreatingExpressionError::UnknownProvider(p.clone(), *marker);
+            let e = MaybeMarked::new_marked(
+                CreatingExpressionError::UnknownProvider(p.clone()),
+                *marker,
+            );
             Err(e.into())
         } else {
             Ok(())

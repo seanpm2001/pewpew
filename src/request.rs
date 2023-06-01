@@ -178,8 +178,15 @@ impl Outgoing {
 }
 
 type ProviderStreamStream<Ar> = Box<
-    dyn Stream<Item = Result<(json::Value, Vec<Ar>), config::ExecutingExpressionError>>
-        + Send
+    dyn Stream<
+            Item = Result<
+                (json::Value, Vec<Ar>),
+                config::shared::maybe_marked::MaybeMarked<
+                    config::ExecutingExpressionError,
+                    config::shared::maybe_marked::True,
+                >,
+            >,
+        > + Send
         + Unpin
         + 'static,
 >;

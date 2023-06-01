@@ -3,4 +3,4 @@ pub use configv1::*;
 
 pub mod configv2;
 
-mod shared;
+pub mod shared;

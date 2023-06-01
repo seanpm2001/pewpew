@@ -1,6 +1,6 @@
 use std::{error::Error as StdError, fmt};
 
-use crate::shared::maybe_marked::{MaybeMarked, True, MM};
+use crate::shared::maybe_marked::{AllowMarkers, MaybeMarked, True, MM};
 use serde_json as json;
 use yaml_rust::scanner::{Marker, ScanError};
 
@@ -23,6 +23,14 @@ pub enum CreatingExpressionError {
 impl From<ExecutingExpressionError> for CreatingExpressionError {
     fn from(e: ExecutingExpressionError) -> Self {
         CreatingExpressionError::Executing(e)
+    }
+}
+
+impl<B: AllowMarkers> From<MaybeMarked<ExecutingExpressionError, B>>
+    for MaybeMarked<CreatingExpressionError, B>
+{
+    fn from(value: MaybeMarked<ExecutingExpressionError, B>) -> Self {
+        value.map_into()
     }
 }
 

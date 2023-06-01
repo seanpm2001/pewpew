@@ -2,13 +2,15 @@ use hyper::http::Error as HttpError;
 
 use std::{error::Error as StdError, fmt, path::PathBuf, sync::Arc, time::SystemTime};
 
+use config::shared::maybe_marked as mm;
+
 // An error that can happen in normal execution of an endpoint, but should not halt the test
 #[derive(Clone, Debug)]
 pub enum RecoverableError {
     ProviderDelay(String),
     BodyErr(Arc<dyn StdError + Send + Sync>),
     ConnectionErr(SystemTime, Arc<dyn StdError + Send + Sync>),
-    ExecutingExpression(Box<config::ExecutingExpressionError>),
+    ExecutingExpression(Box<mm::MaybeMarked<config::ExecutingExpressionError, mm::True>>),
     Timeout(SystemTime),
 }
 
@@ -102,31 +104,34 @@ impl StdError for TestError {
 
 impl From<config::Error> for TestError {
     fn from(ce: config::Error) -> Self {
-        if let config::Error::ExpressionErr(config::CreatingExpressionError::Executing(
-            e @ config::ExecutingExpressionError::IndexingIntoJson(..),
-        )) = ce
-        {
-            Recoverable(ExecutingExpression(e.into()))
+        if let config::Error::ExpressionErr(e) = ce {
+            let (e, m) = e.extract();
+            match e {
+                config::CreatingExpressionError::Executing(
+                    e @ config::ExecutingExpressionError::IndexingIntoJson(..),
+                ) => Recoverable(ExecutingExpression(mm::MaybeMarked::from(e).zip(&m).into())),
+                _ => Config(config::Error::ExpressionErr(mm::MaybeMarked::from(e).zip(&m)).into()),
+            }
         } else {
             Config(ce.into())
         }
     }
 }
 
-impl From<config::CreatingExpressionError> for TestError {
-    fn from(ce: config::CreatingExpressionError) -> Self {
+impl From<mm::MaybeMarked<config::CreatingExpressionError, mm::True>> for TestError {
+    fn from(ce: mm::MaybeMarked<config::CreatingExpressionError, mm::True>) -> Self {
         Config(Box::new(ce.into()))
     }
 }
 
-impl From<config::ExecutingExpressionError> for TestError {
-    fn from(e: config::ExecutingExpressionError) -> Self {
+impl From<mm::MaybeMarked<config::ExecutingExpressionError, mm::True>> for TestError {
+    fn from(e: mm::MaybeMarked<config::ExecutingExpressionError, mm::True>) -> Self {
         Config(Box::new(e.into()))
     }
 }
 
-impl From<config::ExecutingExpressionError> for RecoverableError {
-    fn from(e: config::ExecutingExpressionError) -> Self {
+impl From<mm::MaybeMarked<config::ExecutingExpressionError, mm::True>> for RecoverableError {
+    fn from(e: mm::MaybeMarked<config::ExecutingExpressionError, mm::True>) -> Self {
         ExecutingExpression(Box::new(e))
     }
 }
