@@ -36,7 +36,7 @@ use std::{
     time::Duration,
 };
 
-use crate::shared::maybe_marked::MaybeMarked;
+use crate::shared::maybe_marked::{AllowMarkers, MaybeMarked, MaybeMarker, True};
 
 fn map_yaml_deserialize_err(name: String) -> impl FnOnce(Error) -> Error {
     |mut err| {
@@ -2126,15 +2126,15 @@ struct PreValueOrExpression(WithMarker<String>);
 impl PreValueOrExpression {
     fn evaluate(
         &self,
-        required_providers: &mut RequiredProviders,
+        required_providers: &mut RequiredProviders<True>,
         static_vars: &BTreeMap<String, json::Value>,
-    ) -> Result<ValueOrExpression, Error> {
+    ) -> Result<ValueOrExpression<True>, Error> {
         ValueOrExpression::new(
             &self.0.inner,
             required_providers,
             static_vars,
             false,
-            self.0.marker,
+            self.0.marker.into(),
         )
         .map_err(Into::into)
     }
@@ -2163,7 +2163,7 @@ impl PreTemplate {
     fn evaluate(
         &self,
         static_vars: &BTreeMap<String, json::Value>,
-        required_providers: &mut RequiredProviders,
+        required_providers: &mut RequiredProviders<True>,
     ) -> Result<String, Error> {
         self.as_template(static_vars, required_providers)
             .and_then(|t| {
@@ -2175,14 +2175,14 @@ impl PreTemplate {
     fn as_template(
         &self,
         static_vars: &BTreeMap<String, json::Value>,
-        required_providers: &mut RequiredProviders,
-    ) -> Result<Template, Error> {
+        required_providers: &mut RequiredProviders<True>,
+    ) -> Result<Template<True>, Error> {
         Template::new(
             &self.0.inner,
             static_vars,
             required_providers,
             self.1,
-            self.0.marker,
+            self.0.marker.into(),
         )
         .map_err(Into::into)
     }
@@ -2204,7 +2204,7 @@ impl PreVar {
         fn json_transform(
             v: &mut json::Value,
             env_vars: &BTreeMap<String, json::Value>,
-            marker: Marker,
+            marker: MaybeMarker<True>,
         ) -> Result<(), Error> {
             match v {
                 json::Value::String(s) => {
@@ -2240,7 +2240,11 @@ impl PreVar {
             Ok(())
         }
 
-        json_transform(&mut self.0.inner, env_vars, self.0.marker)?;
+        json_transform(
+            &mut self.0.inner,
+            env_vars,
+            MaybeMarker::new_marked((), self.0.marker),
+        )?;
         Ok(self.0.inner)
     }
 }
@@ -2427,8 +2431,8 @@ impl Logger {
     pub fn from_pre_processed(
         logger: LoggerPreProcessed,
         vars: &BTreeMap<String, json::Value>,
-        required_providers: &mut RequiredProviders,
-    ) -> Result<(Self, Option<Select>), Error> {
+        required_providers: &mut RequiredProviders<True>,
+    ) -> Result<(Self, Option<Select<True>>), Error> {
         let LoggerPreProcessed {
             pretty,
             to,
@@ -2460,29 +2464,29 @@ impl Logger {
 
 pub struct Endpoint {
     pub body: BodyTemplate,
-    pub declare: Vec<(String, ValueOrExpression)>,
-    pub headers: Vec<(String, Template)>,
+    pub declare: Vec<(String, ValueOrExpression<True>)>,
+    pub headers: Vec<(String, Template<True>)>,
     pub load_pattern: Option<LoadPattern>,
-    pub logs: Vec<(String, Select)>,
+    pub logs: Vec<(String, Select<True>)>,
     pub max_parallel_requests: Option<NonZeroUsize>,
     pub method: Method,
     pub no_auto_returns: bool,
     pub on_demand: bool,
     pub peak_load: Option<HitsPer>,
-    pub provides: Vec<(String, Select)>,
-    pub providers_to_stream: RequiredProviders,
-    pub required_providers: RequiredProviders,
+    pub provides: Vec<(String, Select<True>)>,
+    pub providers_to_stream: RequiredProviders<True>,
+    pub required_providers: RequiredProviders<True>,
     pub request_timeout: Option<Duration>,
-    pub tags: BTreeMap<String, Template>,
-    pub url: Template,
+    pub tags: BTreeMap<String, Template<True>>,
+    pub url: Template<True>,
 }
 
 #[derive(Clone)]
 pub struct MultipartPiece {
     pub name: String,
-    pub headers: Vec<(String, Template)>,
+    pub headers: Vec<(String, Template<True>)>,
     pub is_file: bool,
-    pub template: Template,
+    pub template: Template<True>,
 }
 
 #[derive(Clone)]
@@ -2493,10 +2497,10 @@ pub struct MultipartBody {
 
 #[derive(Clone)]
 pub enum BodyTemplate {
-    File(PathBuf, Template),
+    File(PathBuf, Template<True>),
     Multipart(MultipartBody),
     None,
-    String(Template),
+    String(Template<True>),
 }
 
 impl fmt::Display for BodyTemplate {
@@ -2516,7 +2520,7 @@ impl Endpoint {
         endpoint_id: usize,
         static_vars: &BTreeMap<String, json::Value>,
         global_load_pattern: &Option<LoadPattern>,
-        global_headers: &[(String, (Template, RequiredProviders))],
+        global_headers: &[(String, (Template<True>, RequiredProviders<True>))],
         config_path: &Path,
     ) -> Result<Self, Error> {
         let EndpointPreProcessed {
@@ -2728,8 +2732,8 @@ impl Endpoint {
     fn append_processed_logger(
         &mut self,
         key: String,
-        value: Select,
-        required_providers: Option<RequiredProviders>,
+        value: Select<True>,
+        required_providers: Option<RequiredProviders<True>>,
     ) {
         self.logs.push((key, value));
         if let Some(required_providers) = required_providers {
@@ -2892,9 +2896,9 @@ impl LoadTest {
         // validate each endpoint only references valid loggers and providers
         for (e, marker) in loadtest.endpoints.iter().zip(endpoint_markers) {
             loadtest.verify_loggers(e.logs.iter().map(|(l, _)| (l, &marker)))?;
-            let providers = e.provides.iter().map(|(k, _)| (k, &marker));
+            let providers = e.provides.iter().map(|(k, _)| (k, &marker.into()));
             let providers = e.required_providers.iter().chain(providers);
-            loadtest.verify_providers(providers)?;
+            loadtest.verify_providers::<_, True>(providers)?;
         }
 
         Ok(loadtest)
@@ -2913,7 +2917,7 @@ impl LoadTest {
         let (value, select) =
             Logger::from_pre_processed(value, &self.vars, &mut required_providers)?;
         self.loggers.insert(key.clone(), value);
-        self.verify_providers(required_providers.iter())?;
+        self.verify_providers::<_, True>(required_providers.iter())?;
         if let Some(select) = select {
             for endpoint in &mut self.endpoints {
                 endpoint.append_processed_logger(
@@ -2953,15 +2957,14 @@ impl LoadTest {
         }
     }
 
-    fn verify_providers<'a, I: Iterator<Item = (&'a String, &'a Marker)>>(
-        &self,
-        mut providers: I,
-    ) -> Result<(), Error> {
+    fn verify_providers<'a, I, B>(&self, mut providers: I) -> Result<(), Error>
+    where
+        B: AllowMarkers,
+        I: Iterator<Item = (&'a String, &'a MaybeMarker<True>)>,
+    {
         if let Some((p, marker)) = providers.find(|(p, _)| !self.providers.contains_key(*p)) {
-            let e = MaybeMarked::new_marked(
-                CreatingExpressionError::UnknownProvider(p.clone()),
-                *marker,
-            );
+            let e =
+                MaybeMarked::from(CreatingExpressionError::UnknownProvider(p.clone())).zip(marker);
             Err(e.into())
         } else {
             Ok(())

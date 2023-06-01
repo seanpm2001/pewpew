@@ -21,8 +21,9 @@ use std::{
 use yaml_rust::scanner::Marker;
 
 pub type MM<T, B> = MaybeMarked<T, B>;
+pub type MaybeMarker<B> = MaybeMarked<(), B>;
 
-pub trait AllowMarkers: Copy {
+pub trait AllowMarkers: Copy + fmt::Debug + Send + std::marker::Unpin + 'static {
     type Inverse: AllowMarkers;
 }
 
@@ -33,7 +34,7 @@ impl AllowMarkers for True {
     type Inverse = False;
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub enum False {}
 
 impl AllowMarkers for False {
@@ -88,6 +89,16 @@ impl<T> MaybeMarked<T, True> {
             // reached.
             MaybeMarkedInner::Unmarked { .. } => unsafe { unreachable_unchecked() },
         }
+    }
+}
+
+impl From<Marker> for MaybeMarker<True> {
+    fn from(value: Marker) -> Self {
+        Self(MaybeMarkedInner::Marked {
+            value: (),
+            marker: value,
+            __dontuse: True,
+        })
     }
 }
 

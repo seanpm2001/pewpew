@@ -2,7 +2,7 @@ use crate::expression_functions::{
     Collect, Encode, Entries, Epoch, If, Join, JsonPath, Match, MinMax, Pad, ParseNum, Random,
     Range, Repeat, Replace,
 };
-use crate::shared::maybe_marked::{AllowMarkers, MaybeMarked, True};
+use crate::shared::maybe_marked::{AllowMarkers, MaybeMarked, MaybeMarker, True};
 use crate::{
     create_marker, json_value_to_string, EndpointProvidesPreProcessed, EndpointProvidesSendOptions,
     WithMarker,
@@ -20,7 +20,6 @@ use pest::{
 };
 use pest_derive::Parser;
 use serde_json as json;
-use yaml_rust::scanner::Marker;
 use zip_all::zip_all;
 
 use std::{
@@ -30,22 +29,22 @@ use std::{
     sync::Arc,
 };
 
-type ProviderStreamStream<Ar> = Box<
-    dyn Stream<Item = Result<(json::Value, Vec<Ar>), MaybeMarked<ExecutingExpressionError, True>>>
+type ProviderStreamStream<Ar, B> = Box<
+    dyn Stream<Item = Result<(json::Value, Vec<Ar>), MaybeMarked<ExecutingExpressionError, B>>>
         + Send
         + Unpin
         + 'static,
 >;
 
-pub trait ProviderStream<Ar: Clone + Send + Unpin + 'static> {
+pub trait ProviderStream<Ar: Clone + Send + Unpin + 'static, B: AllowMarkers> {
     #[allow(clippy::wrong_self_convention)]
-    fn into_stream(&self) -> ProviderStreamStream<Ar>;
+    fn into_stream(&self) -> ProviderStreamStream<Ar, B>;
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct RequiredProviders {
+pub struct RequiredProviders<B: AllowMarkers> {
     /// Used to store more complex select statements
-    inner: BTreeMap<String, Marker>,
+    inner: BTreeMap<String, MaybeMarker<B>>,
     /// Bitwise map of what standard request/response/stats are included
     special: u16,
     /// Bitwise map of what standard request/response/stats are included
@@ -53,7 +52,7 @@ pub struct RequiredProviders {
     is_where: bool,
 }
 
-impl RequiredProviders {
+impl<B: AllowMarkers> RequiredProviders<B> {
     pub fn new() -> Self {
         RequiredProviders {
             inner: BTreeMap::new(),
@@ -67,7 +66,7 @@ impl RequiredProviders {
         self.is_where = true;
     }
 
-    pub(super) fn insert(&mut self, s: String, marker: Marker) {
+    pub(super) fn insert(&mut self, s: String, marker: MaybeMarker<B>) {
         let special = if self.is_where {
             &mut self.where_special
         } else {
@@ -106,14 +105,14 @@ impl RequiredProviders {
         self.inner.remove(s);
     }
 
-    pub(super) fn extend(&mut self, other: RequiredProviders) {
+    pub(super) fn extend(&mut self, other: RequiredProviders<B>) {
         self.special |= other.special;
         self.where_special |= other.special;
         self.inner.extend(other.inner);
     }
 
     /// Returns the inner complex select options
-    pub fn into_inner(self) -> BTreeMap<String, Marker> {
+    pub fn into_inner(self) -> BTreeMap<String, MaybeMarker<B>> {
         self.inner
     }
 
@@ -137,38 +136,38 @@ impl RequiredProviders {
         self.special == 0 && self.inner.is_empty()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&String, &Marker)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &MaybeMarker<B>)> {
         self.inner.iter()
     }
 }
 
 #[derive(Clone, Debug)]
-pub(super) enum FunctionCall {
-    Collect(Collect),
-    Encode(Encode),
-    Entries(Entries),
+pub(super) enum FunctionCall<B: AllowMarkers> {
+    Collect(Collect<B>),
+    Encode(Encode<B>),
+    Entries(Entries<B>),
     Epoch(Epoch),
-    If(Box<If>),
-    Join(Join),
-    JsonPath(JsonPath),
-    Match(Box<Match>),
-    MinMax(MinMax),
-    Pad(Pad),
+    If(Box<If<B>>),
+    Join(Join<B>),
+    JsonPath(JsonPath<B>),
+    Match(Box<Match<B>>),
+    MinMax(MinMax<B>),
+    Pad(Pad<B>),
     Random(Random),
-    Range(Box<Range>),
+    Range(Box<Range<B>>),
     Repeat(Repeat),
-    Replace(Box<Replace>),
-    ParseNum(ParseNum),
+    Replace(Box<Replace<B>>),
+    ParseNum(ParseNum<B>),
 }
 
-impl FunctionCall {
+impl<B: AllowMarkers> FunctionCall<B> {
     fn new(
         ident: &str,
-        args: Vec<ValueOrExpression>,
-        providers: &mut RequiredProviders,
+        args: Vec<ValueOrExpression<B>>,
+        providers: &mut RequiredProviders<B>,
         static_vars: &BTreeMap<String, json::Value>,
-        marker: Marker,
-    ) -> Result<Either<Self, json::Value>, MaybeMarked<CreatingExpressionError, True>> {
+        marker: MaybeMarker<B>,
+    ) -> Result<Either<Self, json::Value>, MaybeMarked<CreatingExpressionError, B>> {
         debug!("FunctionCall::new ident=\"{}\" args=\"{:?}\" providers=\"{:?}\" static_vars=\"{:?}\" marker=\"{:?}\"",
             ident, args, providers, static_vars, marker);
         let r = match ident {
@@ -193,10 +192,10 @@ impl FunctionCall {
             "parseInt" => Either::A(FunctionCall::ParseNum(ParseNum::new(false, args, marker)?)),
             "parseFloat" => Either::A(FunctionCall::ParseNum(ParseNum::new(true, args, marker)?)),
             _ => {
-                return Err(MaybeMarked::new_marked(
-                    CreatingExpressionError::UnknownFunction(ident.into()),
-                    marker,
+                return Err(MaybeMarked::from(CreatingExpressionError::UnknownFunction(
+                    ident.into(),
                 ))
+                .zip(&marker))
             }
         };
         Ok(r)
@@ -207,7 +206,7 @@ impl FunctionCall {
         d: Cow<'a, json::Value>,
         no_recoverable_error: bool,
         for_each: Option<&[Cow<'a, json::Value>]>,
-    ) -> Result<Cow<'a, json::Value>, MaybeMarked<ExecutingExpressionError, True>> {
+    ) -> Result<Cow<'a, json::Value>, MaybeMarked<ExecutingExpressionError, B>> {
         debug!("FunctionCall::evaluate function=\"{:?}\"", self);
         match self {
             FunctionCall::Collect(c) => c.evaluate(d, no_recoverable_error, for_each),
@@ -235,7 +234,7 @@ impl FunctionCall {
         for_each: Option<&[Cow<'a, json::Value>]>,
     ) -> Result<
         impl Iterator<Item = Cow<'a, json::Value>> + Clone,
-        MaybeMarked<ExecutingExpressionError, True>,
+        MaybeMarked<ExecutingExpressionError, B>,
     > {
         debug!("FunctionCall::evaluate_as_iter function=\"{:?}\"", self);
         // Create a unique set of Either3 options to be able to create one large Either that we can call shared methods
@@ -298,14 +297,13 @@ impl FunctionCall {
 
     fn into_stream<
         Ar: Clone + Send + Unpin + 'static,
-        P: ProviderStream<Ar> + Send + Unpin + 'static,
+        P: ProviderStream<Ar, B> + Send + Unpin + 'static,
     >(
         self,
         providers: &BTreeMap<String, P>,
         no_recoverable_error: bool,
-    ) -> impl Stream<
-        Item = Result<(json::Value, Vec<Ar>), MaybeMarked<ExecutingExpressionError, True>>,
-    > + Send {
+    ) -> impl Stream<Item = Result<(json::Value, Vec<Ar>), MaybeMarked<ExecutingExpressionError, B>>>
+           + Send {
         debug!("FunctionCall::into_stream function=\"{:?}\"", self);
         match self {
             FunctionCall::Collect(c) => c.into_stream(providers, no_recoverable_error).boxed(),
@@ -327,13 +325,13 @@ impl FunctionCall {
     }
 }
 
-fn index_json<'a>(
+fn index_json<'a, B: AllowMarkers>(
     json: Cow<'a, json::Value>,
-    index: Either<&PathSegment, &str>,
+    index: Either<&PathSegment<B>, &str>,
     no_err: bool,
     for_each: Option<&[Cow<'a, json::Value>]>,
-    marker: Marker,
-) -> Result<Cow<'a, json::Value>, MaybeMarked<ExecutingExpressionError, True>> {
+    marker: MaybeMarker<B>,
+) -> Result<Cow<'a, json::Value>, MaybeMarked<ExecutingExpressionError, B>> {
     log::trace!(
         "index_json json: {}, index: {:?}, no_err: {}, for_each: {:?}, marker: {:?}",
         json,
@@ -370,16 +368,21 @@ fn index_json<'a>(
             Some(Cow::Owned(ret))
         }
         (json, Either::A(s)) if !no_err => {
-            return Err(MaybeMarked::new_marked(
-                ExecutingExpressionError::IndexingIntoJson(s.into(), json.into_owned()),
-                marker,
-            ));
+            return Err(
+                MaybeMarked::from(ExecutingExpressionError::IndexingIntoJson(
+                    s.into(),
+                    json.into_owned(),
+                ))
+                .zip(&marker),
+            );
         }
         (json, Either::B(n)) if !no_err => {
-            return Err(MaybeMarked::new_marked(
-                ExecutingExpressionError::IndexingIntoJson(format!("[{n}]"), json.into_owned()),
-                marker,
-            ));
+            return Err(ExecutingExpressionError::IndexingIntoJson(
+                format!("[{n}]"),
+                json.into_owned(),
+            )
+            .into()
+            .zip(marker));
         }
         _ => None,
     };
@@ -387,13 +390,13 @@ fn index_json<'a>(
     Ok(o)
 }
 
-fn index_json2<'a>(
+fn index_json2<'a, B: AllowMarkers>(
     mut json: Cow<'a, json::Value>,
-    indexes: &[PathSegment],
+    indexes: &[PathSegment<B>],
     no_err: bool,
     for_each: Option<&[Cow<'a, json::Value>]>,
-    marker: Marker,
-) -> Result<Cow<'a, json::Value>, MaybeMarked<ExecutingExpressionError, True>> {
+    marker: MaybeMarker<B>,
+) -> Result<Cow<'a, json::Value>, MaybeMarked<ExecutingExpressionError, B>> {
     log::trace!(
         "index_json2 json: {}, indexes: {:?}, no_err: {}, for_each: {:?}, marker: {:?}",
         json,
@@ -424,16 +427,19 @@ fn index_json2<'a>(
                 Some(Cow::Owned(ret))
             }
             (json, Either::A(s)) if !no_err => {
-                return Err(MaybeMarked::new_marked(
-                    ExecutingExpressionError::IndexingIntoJson(s, json.into_owned()),
-                    marker,
-                ))
+                return Err(
+                    ExecutingExpressionError::IndexingIntoJson(s, json.into_owned())
+                        .into()
+                        .zip(marker),
+                )
             }
             (json, Either::B(n)) if !no_err => {
-                return Err(MaybeMarked::new_marked(
-                    ExecutingExpressionError::IndexingIntoJson(format!("[{n}]"), json.into_owned()),
-                    marker,
-                ));
+                return Err(ExecutingExpressionError::IndexingIntoJson(
+                    format!("[{n}]"),
+                    json.into_owned(),
+                )
+                .into()
+                .zip(marker));
             }
             _ => None,
         };
@@ -443,18 +449,19 @@ fn index_json2<'a>(
 }
 
 #[derive(Clone, Debug)]
-pub struct Path {
-    pub(super) start: PathStart,
-    pub(super) rest: Vec<PathSegment>,
+pub struct Path<B: AllowMarkers> {
+    pub(super) start: PathStart<B>,
+    pub(super) rest: Vec<PathSegment<B>>,
+    pub(super) marker: MaybeMarker<B>,
 }
 
-impl MaybeMarked<Path, True> {
+impl<B: AllowMarkers> Path<B> {
     fn evaluate<'a, 'b: 'a>(
         &'b self,
         d: Cow<'a, json::Value>,
         no_recoverable_error: bool,
         for_each: Option<&[Cow<'a, json::Value>]>,
-    ) -> Result<Cow<'a, json::Value>, MaybeMarked<ExecutingExpressionError, True>> {
+    ) -> Result<Cow<'a, json::Value>, MaybeMarked<ExecutingExpressionError, B>> {
         log::trace!(
             "Path::evaluate self: {:?}, d: {:?}, no_recoverable_error: {}, for_each: {:?}",
             self,
@@ -479,18 +486,12 @@ impl MaybeMarked<Path, True> {
                 }
             }
             (PathStart::Ident(s), _) => (
-                index_json(
-                    d,
-                    Either::B(s),
-                    no_recoverable_error,
-                    for_each,
-                    *self.get_marker(),
-                )?,
+                index_json(d, Either::B(s), no_recoverable_error, for_each, self.marker)?,
                 self.rest.as_slice(),
             ),
             (PathStart::Value(v), _) => (Cow::Borrowed(v), self.rest.as_slice()),
         };
-        index_json2(v, rest, no_recoverable_error, for_each, *self.get_marker())
+        index_json2(v, rest, no_recoverable_error, for_each, self.marker)
     }
 
     fn evaluate_as_iter<'a, 'b: 'a>(
@@ -499,10 +500,9 @@ impl MaybeMarked<Path, True> {
         no_recoverable_error: bool,
         for_each: Option<&[Cow<'a, json::Value>]>,
     ) -> Result<
-        impl Iterator<
-                Item = Result<Cow<'a, json::Value>, MaybeMarked<ExecutingExpressionError, True>>,
-            > + Clone,
-        MaybeMarked<ExecutingExpressionError, True>,
+        impl Iterator<Item = Result<Cow<'a, json::Value>, MaybeMarked<ExecutingExpressionError, B>>>
+            + Clone,
+        MaybeMarked<ExecutingExpressionError, B>,
     > {
         log::trace!(
             "Path::evaluate_as_iter self: {:?}, d: {:?}, no_recoverable_error: {}, for_each: {:?}",
@@ -517,7 +517,7 @@ impl MaybeMarked<Path, True> {
                 Either::A(
                     fnc.evaluate_as_iter(d, no_recoverable_error, for_each)?
                         .map(move |j| {
-                            index_json2(j, &rest, no_recoverable_error, None, *self.get_marker())
+                            index_json2(j, &rest, no_recoverable_error, None, self.marker)
                         }),
                 )
             }
@@ -535,13 +535,7 @@ impl MaybeMarked<Path, True> {
                     }
                 } else {
                     (
-                        index_json(
-                            d,
-                            Either::B(s),
-                            no_recoverable_error,
-                            for_each,
-                            *self.get_marker(),
-                        )?,
+                        index_json(d, Either::B(s), no_recoverable_error, for_each, self.marker)?,
                         self.rest.as_slice(),
                     )
                 };
@@ -550,7 +544,7 @@ impl MaybeMarked<Path, True> {
                     rest,
                     no_recoverable_error,
                     for_each,
-                    *self.get_marker(),
+                    self.marker,
                 )?)))
             }
             PathStart::Value(v) => Either::B(iter::once(Ok(Cow::Borrowed(v)))),
@@ -560,12 +554,12 @@ impl MaybeMarked<Path, True> {
 
     fn into_stream<
         Ar: Clone + Send + Unpin + 'static,
-        P: ProviderStream<Ar> + Send + Unpin + 'static,
+        P: ProviderStream<Ar, B> + Send + Unpin + 'static,
     >(
         self,
         providers: &BTreeMap<String, P>,
         no_recoverable_error: bool,
-    ) -> impl Stream<Item = Result<(json::Value, Vec<Ar>), MaybeMarked<ExecutingExpressionError, True>>>
+    ) -> impl Stream<Item = Result<(json::Value, Vec<Ar>), MaybeMarked<ExecutingExpressionError, B>>>
     {
         log::trace!(
             "Path::into_stream self: {:?}, providers: {:?}, no_recoverable_error: {}",
@@ -573,7 +567,7 @@ impl MaybeMarked<Path, True> {
             providers.keys(),
             no_recoverable_error
         );
-        let marker = *self.get_marker();
+        let marker = self.as_marker();
         let p = self.into_inner();
         // TODO: don't we need providers when evaluating `rest`?
         let rest = p.rest;
@@ -600,7 +594,7 @@ impl MaybeMarked<Path, True> {
                         let v =
                             index_json2(Cow::Owned(v), &rest, no_recoverable_error, None, marker)?
                                 .into_owned();
-                        Ok::<_, MaybeMarked<ExecutingExpressionError, True>>((v, outgoing))
+                        Ok::<_, MaybeMarked<ExecutingExpressionError, B>>((v, outgoing))
                     })
                     .b3()
             }
@@ -635,28 +629,28 @@ pub(super) fn f64_value(json: &json::Value) -> f64 {
 }
 
 #[derive(Clone, Debug)]
-pub enum ValueOrExpression<B: AllowMarkers = True> {
+pub enum ValueOrExpression<B: AllowMarkers> {
     Value(Value<B>),
-    Expression(Expression),
+    Expression(Expression<B>),
 }
 
-impl ValueOrExpression {
+impl<B: AllowMarkers> ValueOrExpression<B> {
     pub fn new(
         expr: &str,
-        providers: &mut RequiredProviders,
+        providers: &mut RequiredProviders<B>,
         static_vars: &BTreeMap<String, json::Value>,
         no_recoverable_error: bool,
-        marker: Marker,
-    ) -> Result<Self, MaybeMarked<CreatingExpressionError, True>> {
+        marker: MaybeMarker<B>,
+    ) -> Result<Self, MaybeMarked<CreatingExpressionError, B>> {
         let pairs = Parser::parse(Rule::entry_point, expr).map_err(|e| {
-            MaybeMarked::new_marked(CreatingExpressionError::InvalidExpression(e), marker)
+            MaybeMarked::from(CreatingExpressionError::InvalidExpression(e)).zip(&marker)
         })?;
         let e = parse_expression(pairs, providers, static_vars, no_recoverable_error, marker)?;
         log::debug!("ValueOrExpression parse_expression: {:?}", e);
         ValueOrExpression::from_expression(e)
     }
 
-    fn from_expression(e: Expression) -> Result<Self, MaybeMarked<CreatingExpressionError, True>> {
+    fn from_expression(e: Expression<B>) -> Result<Self, MaybeMarked<CreatingExpressionError, B>> {
         let voe = match e.simplify_to_json()? {
             Either::A(v) => ValueOrExpression::Value(Value::Json(v)),
             Either::B(e) => ValueOrExpression::Expression(e),
@@ -669,7 +663,7 @@ impl ValueOrExpression {
         d: Cow<'a, json::Value>,
         no_recoverable_error: bool,
         for_each: Option<&[Cow<'a, json::Value>]>,
-    ) -> Result<Cow<'a, json::Value>, MaybeMarked<ExecutingExpressionError, True>> {
+    ) -> Result<Cow<'a, json::Value>, MaybeMarked<ExecutingExpressionError, B>> {
         match self {
             ValueOrExpression::Value(v) => v.evaluate(d, no_recoverable_error, for_each),
             ValueOrExpression::Expression(e) => e.evaluate(d, no_recoverable_error, for_each),
@@ -682,10 +676,9 @@ impl ValueOrExpression {
         no_recoverable_error: bool,
         for_each: Option<&[Cow<'a, json::Value>]>,
     ) -> Result<
-        impl Iterator<
-                Item = Result<Cow<'a, json::Value>, MaybeMarked<ExecutingExpressionError, True>>,
-            > + Clone,
-        MaybeMarked<ExecutingExpressionError, True>,
+        impl Iterator<Item = Result<Cow<'a, json::Value>, MaybeMarked<ExecutingExpressionError, B>>>
+            + Clone,
+        MaybeMarked<ExecutingExpressionError, B>,
     > {
         match self {
             ValueOrExpression::Value(v) => Ok(Either::A(v.evaluate_as_iter(
@@ -703,12 +696,12 @@ impl ValueOrExpression {
 
     pub fn into_stream<
         Ar: Clone + Send + Unpin + 'static,
-        P: ProviderStream<Ar> + Send + Unpin + 'static,
+        P: ProviderStream<Ar, B> + Send + Unpin + 'static,
     >(
         self,
         providers: &BTreeMap<String, P>,
         no_recoverable_error: bool,
-    ) -> impl Stream<Item = Result<(json::Value, Vec<Ar>), MaybeMarked<ExecutingExpressionError, True>>>
+    ) -> impl Stream<Item = Result<(json::Value, Vec<Ar>), MaybeMarked<ExecutingExpressionError, B>>>
     {
         match self {
             ValueOrExpression::Value(v) => v.into_stream(providers, no_recoverable_error).a(),
@@ -720,19 +713,19 @@ impl ValueOrExpression {
 }
 
 #[derive(Clone, Debug)]
-pub enum Value<B: AllowMarkers = True> {
-    Path(Box<MaybeMarked<Path, B>>),
+pub enum Value<B: AllowMarkers> {
+    Path(Box<Path<B>>),
     Json(json::Value),
-    Template(Template),
+    Template(Template<B>),
 }
 
-impl Value {
+impl<B: AllowMarkers> Value<B> {
     fn evaluate<'a, 'b: 'a>(
         &'b self,
         d: Cow<'a, json::Value>,
         no_recoverable_error: bool,
         for_each: Option<&[Cow<'a, json::Value>]>,
-    ) -> Result<Cow<'a, json::Value>, MaybeMarked<ExecutingExpressionError, True>> {
+    ) -> Result<Cow<'a, json::Value>, MaybeMarked<ExecutingExpressionError, B>> {
         let v = match self {
             Value::Path(path) => path.evaluate(d, no_recoverable_error, for_each)?,
             Value::Json(value) => Cow::Borrowed(value),
@@ -747,10 +740,9 @@ impl Value {
         no_recoverable_error: bool,
         for_each: Option<&[Cow<'a, json::Value>]>,
     ) -> Result<
-        impl Iterator<
-                Item = Result<Cow<'a, json::Value>, MaybeMarked<ExecutingExpressionError, True>>,
-            > + Clone,
-        MaybeMarked<ExecutingExpressionError, True>,
+        impl Iterator<Item = Result<Cow<'a, json::Value>, MaybeMarked<ExecutingExpressionError, B>>>
+            + Clone,
+        MaybeMarked<ExecutingExpressionError, B>,
     > {
         let r = match self {
             Value::Path(path) => Either3::A(
@@ -785,14 +777,13 @@ impl Value {
 
     fn into_stream<
         Ar: Clone + Send + Unpin + 'static,
-        P: ProviderStream<Ar> + Send + Unpin + 'static,
+        P: ProviderStream<Ar, B> + Send + Unpin + 'static,
     >(
         self,
         providers: &BTreeMap<String, P>,
         no_recoverable_error: bool,
-    ) -> impl Stream<
-        Item = Result<(json::Value, Vec<Ar>), MaybeMarked<ExecutingExpressionError, True>>,
-    > + Send
+    ) -> impl Stream<Item = Result<(json::Value, Vec<Ar>), MaybeMarked<ExecutingExpressionError, B>>>
+           + Send
            + Unpin {
         let s = match self {
             Value::Path(path) => path.into_stream(providers, no_recoverable_error).a3(),
@@ -808,21 +799,21 @@ impl Value {
 }
 
 #[derive(Clone, Debug)]
-pub(super) enum PathSegment {
+pub(super) enum PathSegment<B: AllowMarkers> {
     Number(usize),
     String(String),
-    Template(Arc<Template>),
+    Template(Arc<Template<B>>),
 }
 
-impl PathSegment {
+impl<B: AllowMarkers> PathSegment<B> {
     fn from_str(
         s: &str,
-        providers: &mut RequiredProviders,
+        providers: &mut RequiredProviders<B>,
         static_vars: &BTreeMap<String, json::Value>,
         no_recoverable_error: bool,
-        marker: Marker,
-    ) -> Result<Self, MaybeMarked<CreatingExpressionError, True>> {
-        let template = Template::new(s, static_vars, providers, no_recoverable_error, marker)?;
+        marker: MaybeMarker<B>,
+    ) -> Result<Self, MaybeMarked<CreatingExpressionError, B>> {
+        let template = Template::<B>::new(s, static_vars, providers, no_recoverable_error, marker)?;
         let r = match template.simplify_to_string() {
             Either::A(s) => PathSegment::String(s),
             Either::B(t) => PathSegment::Template(t.into()),
@@ -834,7 +825,7 @@ impl PathSegment {
         &self,
         d: Cow<'a, json::Value>,
         for_each: Option<&[Cow<'a, json::Value>]>,
-    ) -> Result<Either<String, usize>, MaybeMarked<ExecutingExpressionError, True>> {
+    ) -> Result<Either<String, usize>, MaybeMarked<ExecutingExpressionError, B>> {
         let r = match self {
             PathSegment::Number(n) => Either::B(*n),
             PathSegment::String(s) => Either::A(s.clone()),
@@ -845,8 +836,8 @@ impl PathSegment {
 }
 
 #[derive(Clone, Debug)]
-pub(super) enum PathStart {
-    FunctionCall(FunctionCall),
+pub(super) enum PathStart<B: AllowMarkers> {
+    FunctionCall(FunctionCall<B>),
     Ident(String),
     Value(json::Value),
 }
@@ -893,11 +884,11 @@ fn to_json_number(n: f64) -> json::Value {
 }
 
 impl InfixOperator {
-    fn evaluate(
+    fn evaluate<B: AllowMarkers>(
         self,
         left: &json::Value,
-        right: Result<Cow<'_, json::Value>, MaybeMarked<ExecutingExpressionError, True>>,
-    ) -> Result<json::Value, MaybeMarked<ExecutingExpressionError, True>> {
+        right: Result<Cow<'_, json::Value>, MaybeMarked<ExecutingExpressionError, B>>,
+    ) -> Result<json::Value, MaybeMarked<ExecutingExpressionError, B>> {
         let value = match self {
             InfixOperator::Add => {
                 let n = f64_value(left) + f64_value(&*right?);
@@ -951,25 +942,25 @@ impl InfixOperator {
 }
 
 #[derive(Clone, Debug)]
-enum ExpressionLhs {
-    Expression(Box<Expression>),
-    Value(Value),
+enum ExpressionLhs<B: AllowMarkers> {
+    Expression(Box<Expression<B>>),
+    Value(Value<B>),
 }
 
 #[derive(Clone, Debug)]
-pub struct Expression {
+pub struct Expression<B: AllowMarkers> {
     not: Option<bool>,
-    lhs: ExpressionLhs,
-    op: Option<(InfixOperator, Box<Expression>)>,
+    lhs: ExpressionLhs<B>,
+    op: Option<(InfixOperator, Box<Self>)>,
 }
 
-impl Expression {
+impl<B: AllowMarkers> Expression<B> {
     fn evaluate<'a, 'b: 'a>(
         &'b self,
         d: Cow<'a, json::Value>,
         no_recoverable_error: bool,
         for_each: Option<&[Cow<'a, json::Value>]>,
-    ) -> Result<Cow<'a, json::Value>, MaybeMarked<ExecutingExpressionError, True>> {
+    ) -> Result<Cow<'a, json::Value>, MaybeMarked<ExecutingExpressionError, B>> {
         let mut v = if let Some((op, rhs)) = &self.op {
             let v = match &self.lhs {
                 ExpressionLhs::Expression(e) => {
@@ -1007,10 +998,9 @@ impl Expression {
         no_recoverable_error: bool,
         for_each: Option<&[Cow<'a, json::Value>]>,
     ) -> Result<
-        impl Iterator<
-                Item = Result<Cow<'a, json::Value>, MaybeMarked<ExecutingExpressionError, True>>,
-            > + Clone,
-        MaybeMarked<ExecutingExpressionError, True>,
+        impl Iterator<Item = Result<Cow<'a, json::Value>, MaybeMarked<ExecutingExpressionError, B>>>
+            + Clone,
+        MaybeMarked<ExecutingExpressionError, B>,
     > {
         let i = if let (None, None, ExpressionLhs::Value(v)) = (&self.op, &self.not, &self.lhs) {
             Either3::A(v.evaluate_as_iter(d, no_recoverable_error, for_each)?)
@@ -1031,14 +1021,13 @@ impl Expression {
 
     fn into_stream<
         Ar: Clone + Send + Unpin + 'static,
-        P: ProviderStream<Ar> + Send + Unpin + 'static,
+        P: ProviderStream<Ar, B> + Send + Unpin + 'static,
     >(
         self,
         providers: &BTreeMap<String, P>,
         no_recoverable_error: bool,
-    ) -> impl Stream<
-        Item = Result<(json::Value, Vec<Ar>), MaybeMarked<ExecutingExpressionError, True>>,
-    > + Send
+    ) -> impl Stream<Item = Result<(json::Value, Vec<Ar>), MaybeMarked<ExecutingExpressionError, B>>>
+           + Send
            + Unpin {
         let v = match self.lhs {
             ExpressionLhs::Expression(e) => e.into_stream(providers, no_recoverable_error).a(),
@@ -1082,7 +1071,7 @@ impl Expression {
 
     fn simplify_to_json(
         self,
-    ) -> Result<Either<json::Value, Self>, MaybeMarked<CreatingExpressionError, True>> {
+    ) -> Result<Either<json::Value, Self>, MaybeMarked<CreatingExpressionError, B>> {
         let aorb = match self {
             Expression {
                 lhs: ExpressionLhs::Value(Value::Json(v)),
@@ -1112,7 +1101,7 @@ impl Expression {
 
     fn simplify_to_string(
         self,
-    ) -> Result<Either<String, Self>, MaybeMarked<CreatingExpressionError, True>> {
+    ) -> Result<Either<String, Self>, MaybeMarked<CreatingExpressionError, B>> {
         Ok(self
             .simplify_to_json()?
             .map_a(|v| json_value_to_string(Cow::Owned(v)).into_owned()))
@@ -1120,22 +1109,22 @@ impl Expression {
 }
 
 #[derive(Clone, Debug)]
-enum ParsedSelect {
+enum ParsedSelect<B: AllowMarkers> {
     Null,
     Bool(bool),
     Number(json::Number),
-    Expression(ValueOrExpression),
-    Array(Vec<ParsedSelect>),
-    Object(Vec<(String, ParsedSelect)>),
+    Expression(ValueOrExpression<B>),
+    Array(Vec<Self>),
+    Object(Vec<(String, Self)>),
 }
 
-impl ParsedSelect {
+impl<B: AllowMarkers> ParsedSelect<B> {
     fn evaluate<'a, 'b: 'a>(
         &'b self,
         d: Cow<'a, json::Value>,
         no_recoverable_error: bool,
         for_each: Option<&[Cow<'a, json::Value>]>,
-    ) -> Result<Cow<'a, json::Value>, MaybeMarked<ExecutingExpressionError, True>> {
+    ) -> Result<Cow<'a, json::Value>, MaybeMarked<ExecutingExpressionError, B>> {
         let r = match self {
             ParsedSelect::Null => Cow::Owned(json::Value::Null),
             ParsedSelect::Bool(b) => Cow::Owned(json::Value::Bool(*b)),
@@ -1158,7 +1147,7 @@ impl ParsedSelect {
                         let v = v
                             .evaluate(Cow::Borrowed(&*d), no_recoverable_error, for_each)?
                             .into_owned();
-                        Ok::<_, MaybeMarked<ExecutingExpressionError, True>>((k.clone(), v))
+                        Ok::<_, MaybeMarked<ExecutingExpressionError, B>>((k.clone(), v))
                     })
                     .collect::<Result<_, _>>()?;
                 Cow::Owned(json::Value::Object(m))
@@ -1196,29 +1185,29 @@ pub const ERROR: u16 = 0b10_0000_0000;
 struct Parser;
 
 #[derive(Clone, Debug)]
-enum TemplatePiece<B: AllowMarkers = True> {
+enum TemplatePiece<B: AllowMarkers> {
     Expression(ValueOrExpression<B>),
     NotExpression(String),
 }
 
 #[derive(Clone, Debug)]
-pub struct Template<B: AllowMarkers = True> {
+pub struct Template<B: AllowMarkers> {
     pieces: Vec<TemplatePiece<B>>,
     size_hint: usize,
     no_recoverable_error: bool,
 }
 
-impl Template {
+impl<B: AllowMarkers> Template<B> {
     pub(crate) fn new(
         t: &str,
         static_vars: &BTreeMap<String, json::Value>,
-        providers: &mut RequiredProviders,
+        providers: &mut RequiredProviders<B>,
         no_recoverable_error: bool,
-        marker: Marker,
-    ) -> Result<Self, MaybeMarked<CreatingExpressionError, True>> {
+        marker: MaybeMarker<B>,
+    ) -> Result<Self, MaybeMarked<CreatingExpressionError, B>> {
         let pairs = Parser::parse(Rule::template_entry_point, t)
             .map_err(|e| {
-                MaybeMarked::new_marked(CreatingExpressionError::InvalidExpression(e), marker)
+                MaybeMarked::from(CreatingExpressionError::InvalidExpression(e)).zip(&marker)
             })?
             .next()
             .expect("Expected 1 pair from parser")
@@ -1270,7 +1259,7 @@ impl Template {
     }
 
     // #[cfg(test)]
-    pub fn simple(t: &str) -> Template {
+    pub fn simple(t: &str) -> Template<True> {
         let s = yaml_rust::scanner::Scanner::new("".chars());
         let marker = s.mark();
         Template::new(
@@ -1278,7 +1267,7 @@ impl Template {
             &Default::default(),
             &mut RequiredProviders::new(),
             false,
-            marker,
+            MaybeMarker::new_marked((), marker),
         )
         .unwrap()
     }
@@ -1303,7 +1292,7 @@ impl Template {
         &self,
         d: Cow<'a, json::Value>,
         for_each: Option<&[Cow<'a, json::Value>]>,
-    ) -> Result<String, MaybeMarked<ExecutingExpressionError, True>> {
+    ) -> Result<String, MaybeMarked<ExecutingExpressionError, B>> {
         self.pieces
             .iter()
             .map(|piece| match piece {
@@ -1329,11 +1318,11 @@ impl Template {
 
     fn into_stream<
         Ar: Clone + Send + Unpin + 'static,
-        P: ProviderStream<Ar> + Send + Unpin + 'static,
+        P: ProviderStream<Ar, B> + Send + Unpin + 'static,
     >(
         self,
         providers: &BTreeMap<String, P>,
-    ) -> impl Stream<Item = Result<(String, Vec<Ar>), MaybeMarked<ExecutingExpressionError, True>>>
+    ) -> impl Stream<Item = Result<(String, Vec<Ar>), MaybeMarked<ExecutingExpressionError, B>>>
     {
         let no_recoverable_error = self.no_recoverable_error;
         let streams = self.pieces.into_iter().map(|piece| match piece {
@@ -1358,24 +1347,24 @@ impl Template {
 }
 
 #[derive(Clone, Debug)]
-pub struct Select {
-    join: Vec<ValueOrExpression>,
+pub struct Select<B: AllowMarkers> {
+    join: Vec<ValueOrExpression<B>>,
     references_for_each: bool,
     where_references_for_each: bool,
     send_behavior: EndpointProvidesSendOptions,
-    select: ParsedSelect,
-    where_clause: Option<Expression>,
+    select: ParsedSelect<B>,
+    where_clause: Option<Expression<B>>,
     no_recoverable_error: bool,
 }
 
-impl Select {
+impl<B: AllowMarkers> Select<B> {
     // #[cfg(test)]
     pub fn simple<S: Into<json::Value>>(
         select: S,
         send: EndpointProvidesSendOptions,
         for_each: Option<Vec<&'static str>>,
         where_clause: Option<&'static str>,
-        required_providers: Option<&mut RequiredProviders>,
+        required_providers: Option<&mut RequiredProviders<B>>,
     ) -> Self {
         let marker = create_marker();
         let select = WithMarker::new(select.into(), marker);
@@ -1400,7 +1389,7 @@ impl Select {
     pub(crate) fn new(
         provides: EndpointProvidesPreProcessed,
         static_vars: &BTreeMap<String, json::Value>,
-        providers: &mut RequiredProviders,
+        providers: &mut RequiredProviders<B>,
         no_recoverable_error: bool,
     ) -> Result<Self, error::Error> {
         // let mut providers = RequiredProviders::new();
@@ -1420,7 +1409,7 @@ impl Select {
                     &mut providers2,
                     static_vars,
                     no_recoverable_error,
-                    v.marker(),
+                    v.marker().into(),
                 )?;
                 log::debug!("Select for_each parse_expression: {:?}", e);
                 if providers2.get_special() & FOR_EACH != 0 {
@@ -1436,7 +1425,7 @@ impl Select {
             .where_clause
             .as_ref()
             .map(|v| {
-                let mut providers2 = RequiredProviders::new();
+                let mut providers2 = RequiredProviders::<B>::new();
                 providers2.set_is_where();
                 let pairs = Parser::parse(Rule::entry_point, v.inner()).map_err(|e| {
                     error::Error::ExpressionErr(MaybeMarked::new_marked(
@@ -1449,7 +1438,7 @@ impl Select {
                     &mut providers2,
                     static_vars,
                     no_recoverable_error,
-                    v.marker(),
+                    v.as_marker(),
                 )?;
                 log::debug!("Select where parse_expression: {:?}", e);
                 where_references_for_each = providers2.get_special() & FOR_EACH != 0;
@@ -1467,7 +1456,7 @@ impl Select {
             &mut providers2,
             static_vars,
             no_recoverable_error,
-            marker,
+            marker.into(),
         )?;
         let references_for_each = providers2.get_special() & FOR_EACH != 0;
         if references_for_each && join.is_empty() {
@@ -1497,7 +1486,7 @@ impl Select {
     pub fn execute_where(
         &self,
         d: &json::Value,
-    ) -> Result<bool, MaybeMarked<ExecutingExpressionError, True>> {
+    ) -> Result<bool, MaybeMarked<ExecutingExpressionError, B>> {
         self.where_clause
             .as_ref()
             .map(|wc| {
@@ -1513,11 +1502,11 @@ impl Select {
         &'a self,
         d: &'a json::Value,
     ) -> Result<
-        impl Iterator<Item = Result<Cow<'a, json::Value>, MaybeMarked<ExecutingExpressionError, True>>>,
-        MaybeMarked<ExecutingExpressionError, True>,
+        impl Iterator<Item = Result<Cow<'a, json::Value>, MaybeMarked<ExecutingExpressionError, B>>>,
+        MaybeMarked<ExecutingExpressionError, B>,
     > {
         let r = if self.join.is_empty() {
-            let r = || -> Result<_, MaybeMarked<ExecutingExpressionError, True>> {
+            let r = || -> Result<_, MaybeMarked<ExecutingExpressionError, B>> {
                 if let Some(wc) = &self.where_clause {
                     if !bool_value(&*wc.evaluate(
                         Cow::Borrowed(d),
@@ -1625,8 +1614,8 @@ impl Select {
         self: Arc<Self>,
         d: Arc<json::Value>,
     ) -> Result<
-        impl Iterator<Item = Result<json::Value, MaybeMarked<ExecutingExpressionError, True>>>,
-        MaybeMarked<ExecutingExpressionError, True>,
+        impl Iterator<Item = Result<json::Value, MaybeMarked<ExecutingExpressionError, B>>>,
+        MaybeMarked<ExecutingExpressionError, B>,
     > {
         let mut iter = None;
         Ok(iter::from_fn(move || {
@@ -1653,13 +1642,13 @@ impl Select {
     }
 }
 
-fn parse_select(
+fn parse_select<B: AllowMarkers>(
     select: json::Value,
-    providers: &mut RequiredProviders,
+    providers: &mut RequiredProviders<B>,
     static_vars: &BTreeMap<String, json::Value>,
     no_recoverable_error: bool,
-    marker: Marker,
-) -> Result<ParsedSelect, MaybeMarked<CreatingExpressionError, True>> {
+    marker: MaybeMarker<B>,
+) -> Result<ParsedSelect<B>, MaybeMarked<CreatingExpressionError, B>> {
     log::trace!(
         "parse_select select: {}, providers: {:?}, no_recoverable_error: {}, marker: {:?}",
         select,
@@ -1687,7 +1676,7 @@ fn parse_select(
             let new = m
                 .into_iter()
                 .map(|(k, v)| {
-                    Ok::<_, MaybeMarked<CreatingExpressionError, True>>((
+                    Ok::<_, MaybeMarked<CreatingExpressionError, B>>((
                         k,
                         parse_select(v, providers, static_vars, no_recoverable_error, marker)?,
                     ))
@@ -1699,13 +1688,13 @@ fn parse_select(
     Ok(r)
 }
 
-fn parse_function_call(
+fn parse_function_call<B: AllowMarkers>(
     pair: Pair<'_, Rule>,
-    providers: &mut RequiredProviders,
+    providers: &mut RequiredProviders<B>,
     static_vars: &BTreeMap<String, json::Value>,
     no_recoverable_error: bool,
-    marker: Marker,
-) -> Result<Either<FunctionCall, json::Value>, MaybeMarked<CreatingExpressionError, True>> {
+    marker: MaybeMarker<B>,
+) -> Result<Either<FunctionCall<B>, json::Value>, MaybeMarked<CreatingExpressionError, B>> {
     log::trace!(
         "parse_function_call pair: {}, providers: {:?}, no_recoverable_error: {}, marker: {:?}",
         pair,
@@ -1746,13 +1735,13 @@ fn parse_function_call(
     )
 }
 
-fn parse_indexed_property(
+fn parse_indexed_property<B: AllowMarkers>(
     pair: Pair<'_, Rule>,
-    providers: &mut RequiredProviders,
+    providers: &mut RequiredProviders<B>,
     static_vars: &BTreeMap<String, json::Value>,
     no_recoverable_error: bool,
-    marker: Marker,
-) -> Result<PathSegment, MaybeMarked<CreatingExpressionError, True>> {
+    marker: MaybeMarker<B>,
+) -> Result<PathSegment<B>, MaybeMarked<CreatingExpressionError, B>> {
     log::trace!(
         "parse_function_call pair: {}, providers: {:?}, no_recoverable_error: {}, marker: {:?}",
         pair,
@@ -1779,14 +1768,13 @@ fn parse_indexed_property(
     }
 }
 
-fn parse_path(
+fn parse_path<B: AllowMarkers>(
     pair: Pair<'_, Rule>,
-    providers: &mut RequiredProviders,
+    providers: &mut RequiredProviders<B>,
     static_vars: &BTreeMap<String, json::Value>,
     no_recoverable_error: bool,
-    marker: Marker,
-) -> Result<Either<json::Value, MaybeMarked<Path, True>>, MaybeMarked<CreatingExpressionError, True>>
-{
+    marker: MaybeMarker<B>,
+) -> Result<Either<json::Value, Path<B>>, MaybeMarked<CreatingExpressionError, B>> {
     log::trace!(
         "parse_path pair: {}, providers: {:?}, no_recoverable_error: {}, marker: {:?}",
         pair,
@@ -1863,8 +1851,11 @@ fn parse_path(
             }
         };
     }
-    let p = Path { start, rest };
-    let p = MaybeMarked::new_marked(p, marker);
+    let p = Path {
+        start,
+        rest,
+        marker,
+    };
     log::trace!("parse_path path: {:?}", p);
     let r = match p.start {
         PathStart::Value(_) if providers2.is_empty() => {
@@ -1881,13 +1872,13 @@ fn parse_path(
     Ok(r)
 }
 
-fn parse_value(
+fn parse_value<B: AllowMarkers>(
     mut pairs: Pairs<'_, Rule>,
-    providers: &mut RequiredProviders,
+    providers: &mut RequiredProviders<B>,
     static_vars: &BTreeMap<String, json::Value>,
     no_recoverable_error: bool,
-    marker: Marker,
-) -> Result<Value, MaybeMarked<CreatingExpressionError, True>> {
+    marker: MaybeMarker<B>,
+) -> Result<Value<B>, MaybeMarked<CreatingExpressionError, B>> {
     log::trace!(
         "parse_value pairs: {}, providers: {:?}, no_recoverable_error: {}, marker: {:?}",
         pairs,
@@ -1943,15 +1934,15 @@ fn parse_value(
 }
 
 #[derive(Debug)]
-enum ExpressionOrOperator {
-    Expression(Expression),
+enum ExpressionOrOperator<B: AllowMarkers> {
+    Expression(Expression<B>),
     Operator(InfixOperator),
 }
 
-fn expression_helper(
-    mut items: Vec<ExpressionOrOperator>,
+fn expression_helper<B: AllowMarkers>(
+    mut items: Vec<ExpressionOrOperator<B>>,
     level: u8,
-) -> Result<Expression, MaybeMarked<CreatingExpressionError, True>> {
+) -> Result<Expression<B>, MaybeMarked<CreatingExpressionError, B>> {
     log::trace!("expression_helper items: {:?}, level: {}", items, level);
     let i = items.iter().rposition(|eoo| {
         if let ExpressionOrOperator::Operator(o) = eoo {
@@ -2011,14 +2002,14 @@ fn expression_helper(
     }
 }
 
-fn parse_expression_pieces(
+fn parse_expression_pieces<B: AllowMarkers>(
     pairs: Pairs<'_, Rule>,
-    providers: &mut RequiredProviders,
+    providers: &mut RequiredProviders<B>,
     static_vars: &BTreeMap<String, json::Value>,
-    pieces: &mut Vec<ExpressionOrOperator>,
+    pieces: &mut Vec<ExpressionOrOperator<B>>,
     no_recoverable_error: bool,
-    marker: Marker,
-) -> Result<(), MaybeMarked<CreatingExpressionError, True>> {
+    marker: MaybeMarker<B>,
+) -> Result<(), MaybeMarked<CreatingExpressionError, B>> {
     log::trace!(
         "parse_expression_pieces pairs: {}, providers: {:?}, pieces: {:?}, no_recoverable_error: {}, marker: {:?}",
         pairs,
@@ -2123,13 +2114,13 @@ fn parse_expression_pieces(
     Ok(())
 }
 
-fn parse_expression(
+fn parse_expression<B: AllowMarkers>(
     pairs: Pairs<'_, Rule>,
-    providers: &mut RequiredProviders,
+    providers: &mut RequiredProviders<B>,
     static_vars: &BTreeMap<String, json::Value>,
     no_recoverable_error: bool,
-    marker: Marker,
-) -> Result<Expression, MaybeMarked<CreatingExpressionError, True>> {
+    marker: MaybeMarker<B>,
+) -> Result<Expression<B>, MaybeMarked<CreatingExpressionError, B>> {
     log::trace!(
         "parse_expression pairs: {}, providers: {:?}, no_recoverable_error: {}, marker: {:?}",
         pairs,
@@ -2182,7 +2173,7 @@ mod tests {
         Literals(values)
     }
 
-    fn check_results(select: Select, data: json::Value, expect: &[json::Value], i: usize) {
+    fn check_results(select: Select<True>, data: json::Value, expect: &[json::Value], i: usize) {
         let result: Vec<_> = select
             .as_iter(&data)
             .unwrap()
