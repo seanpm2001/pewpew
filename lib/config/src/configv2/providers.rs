@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
 use super::common::ProviderSend;
-use super::OrTemplated;
 use serde::Deserialize;
 
 mod file;
@@ -111,7 +110,7 @@ mod tests {
 
         static TEST_FILE: &str = r##"
 !file
-  path: file.csv
+  path: !l file.csv
   repeat: true
   unique: true
   auto_return: force

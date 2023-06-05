@@ -1,179 +1,156 @@
-//! Generic Types for values that can be evaluated at a later point with config variables.
-//!
-//! Currently, only string key -> string value replacement is implemented; nested mapped values and
-//! expression functions need to be done still.
-
-use once_cell::{sync::Lazy, unsync::OnceCell};
+use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::Deserialize;
-use std::{borrow::Cow, collections::BTreeMap, convert::TryFrom, fmt::Display, str::FromStr};
+use std::{convert::TryFrom, fmt, str::FromStr};
 use thiserror::Error;
 
-// just using pure Strings for now
-pub type Vars = BTreeMap<String, String>;
+#[derive(Default, Deserialize, Debug, PartialEq, Eq, Clone, Copy)]
+pub struct True;
 
-static TEMPLATE_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"\$\{(.*?)}").unwrap());
+#[derive(Deserialize, Debug, PartialEq, Eq, Clone, Copy)]
+pub enum False {}
 
-// TODO: handle providers and expressions (or just go straight to scripting)
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
-struct Template(String);
+pub trait TryDefault: Sized + fmt::Debug {
+    fn try_default() -> Result<Self, &'static str>;
+}
 
-impl Template {
-    #[allow(dead_code, unused_variables)]
-    fn new(s: &str) -> Result<Self, ()> {
-        // if template is valid, return Self, else Err
-        todo!()
-    }
-
-    fn eval(&self, vars: &Vars) -> Result<Cow<str>, String> {
-        // Replace ${var_name} patterns with literal value of var_name
-        // will be unchanged if no patterns are found
-
-        // TODO: Very bad temporary solution, need to fix
-        TEMPLATE_REGEX
-            .captures_iter(&self.0)
-            .all(|c| vars.contains_key(c.get(1).unwrap().as_str()))
-            .then(|| {
-                TEMPLATE_REGEX.replace_all(&self.0, |c: &regex::Captures| {
-                    vars.get(c.get(1).unwrap().as_str()).unwrap()
-                })
-            })
-            .ok_or_else(|| {
-                TEMPLATE_REGEX
-                    .captures_iter(&self.0)
-                    .map(|c| c.get(1).unwrap().as_str())
-                    .find(|k| !vars.contains_key(*k))
-                    .unwrap()
-                    .to_owned()
-            })
+impl TryDefault for True {
+    fn try_default() -> Result<Self, &'static str> {
+        Ok(Self)
     }
 }
 
-/// Contains a value of type `T` that can be represented by a templated string to be evaluated
-/// later. Since the vars are meant to be unchanged for the duration of the program runtime
-/// (at least not without refreshing the entire config file), passing in different vars later
-/// will not update the contained value.
-///
-/// # [`PartialEq`], [`Eq`] behavior
-///
-/// Two [`OrTemplated`] are considered equal if:
-///  - They have both been evaluated, and their values are equal.
-///  - Neither has been evaluated, and the template strings are identical.
-///
-/// In any other case, the two are not considered equal.
-///
-/// ## Examples
-/// ```
-/// # use crate::config::configv2::templating::{OrTemplated, FromTemplatedStr};
-/// let x = OrTemplated::<u8>::new_literal(27);
-///
-/// let y = u8::from_raw_str("${count}").unwrap();
-/// let _ = y.evaluate(&[("count".to_owned(), "27".to_owned())].into());
-///
-/// assert_eq!(x, y);
-/// ```
-#[derive(Debug, Deserialize, Clone, Eq)]
+impl TryDefault for False {
+    fn try_default() -> Result<Self, &'static str> {
+        Err("uninhabited type")
+    }
+}
+
+pub trait Bool: fmt::Debug + TryDefault {
+    type Inverse: Bool + fmt::Debug;
+
+    const VALUE: bool;
+}
+
+trait OK: Default {}
+
+impl OK for True {}
+
+impl Bool for True {
+    type Inverse = False;
+    const VALUE: bool = true;
+}
+
+impl Bool for False {
+    type Inverse = True;
+    const VALUE: bool = false;
+}
+
+pub trait TemplateType: fmt::Debug {
+    type EnvsAllowed: Bool;
+    type VarsAllowed: Bool;
+    type ProvAllowed: Bool;
+}
+
+#[derive(Deserialize, Debug)]
+pub struct EnvsOnly;
+
+impl TemplateType for EnvsOnly {
+    type EnvsAllowed = True;
+    type VarsAllowed = False;
+    type ProvAllowed = False;
+}
+
+#[derive(Deserialize, Debug, PartialEq, Eq, Clone, Copy)]
+pub struct VarsOnly;
+
+impl TemplateType for VarsOnly {
+    type EnvsAllowed = False;
+    type VarsAllowed = True;
+    type ProvAllowed = False;
+}
+
+#[derive(Deserialize, Debug, PartialEq, Eq, Clone, Copy)]
+pub struct Regular;
+
+impl TemplateType for Regular {
+    type EnvsAllowed = False;
+    type VarsAllowed = True;
+    type ProvAllowed = True;
+}
+
+#[derive(Deserialize, Debug, PartialEq, Eq, Clone)]
+#[serde(try_from = "TemplateTmp<V>")]
+pub enum Template<
+    V,
+    T: TemplateType,
+    ED: Bool = <<T as TemplateType>::EnvsAllowed as Bool>::Inverse,
+    VD: Bool = <<T as TemplateType>::VarsAllowed as Bool>::Inverse,
+> {
+    Literal {
+        value: V,
+    },
+    Env {
+        template: TemplatedString,
+        __dontuse: (T::EnvsAllowed, ED::Inverse),
+    },
+    PreVars {
+        template: TemplatedString,
+        __dontuse: (T::VarsAllowed, VD::Inverse),
+    },
+    // needs more work done on this
+    NeedsProviders {
+        script: TemplatedString,
+        __dontuse: (ED, VD, T::ProvAllowed),
+    },
+}
+
+#[derive(Debug, PartialEq, Eq, Deserialize, Clone)]
 #[serde(try_from = "&str")]
-pub struct OrTemplated<T: FromTemplatedStr>(Template, OnceCell<T>);
+#[serde(bound = "")]
+pub struct TemplatedString(Vec<TemplatePiece>);
 
-impl<T, U> PartialEq<OrTemplated<U>> for OrTemplated<T>
-where
-    T: FromTemplatedStr + PartialEq<U>,
-    U: FromTemplatedStr,
-{
-    fn eq(&self, other: &OrTemplated<U>) -> bool {
-        match (self.try_get(), other.try_get()) {
-            (Some(x), Some(y)) => x == y,
-            (None, None) => self.0 == other.0,
-            _ => false,
+impl FromStr for TemplatedString {
+    type Err = &'static str;
+
+    fn from_str(mut s: &str) -> Result<Self, Self::Err> {
+        static REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"\$\{(?:([vpe]):)(.*?)}").unwrap());
+        static REGEX2: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[^\$]*").unwrap());
+
+        let mut pieces = Vec::new();
+        while !s.is_empty() {
+            let caps = REGEX2.captures(s).unwrap();
+            let segment = caps.get(0).unwrap().as_str();
+            if !segment.is_empty() {
+                pieces.push(TemplatePiece::Raw(segment.to_owned()));
+            }
+            s = s.strip_prefix(segment).unwrap();
+
+            if s.is_empty() {
+                return Ok(Self(pieces));
+            }
+
+            let Some(caps) = REGEX.captures(s) else {
+                return Err("mismatched template pattern");
+            };
+
+            let r#type = match caps.get(1).map(|c| c.as_str()).unwrap_or("") {
+                "v" => TemplatePiece::Var,
+                "p" => TemplatePiece::Provider,
+                "e" => TemplatePiece::Env,
+                _ => unreachable!(),
+            };
+
+            let segment = caps.get(0).unwrap().as_str();
+            let path = caps.get(2).unwrap().as_str();
+            pieces.push(r#type(path.to_owned()));
+            s = s.strip_prefix(segment).unwrap();
         }
+        Ok(Self(pieces))
     }
 }
 
-impl<T: FromTemplatedStr> OrTemplated<T> {
-    /// Attempt to directly get the represented `T` value.
-    /// Returns `Some` if the value has previously been evaluated, or was not templated. Returns
-    /// `None` if the template has not been evaluated.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use config::configv2::templating::OrTemplated;
-    /// // Value is present.
-    /// let val = "5".parse::<OrTemplated<u8>>().unwrap();
-    /// assert_eq!(val.try_get(), Some(&5));
-    /// ```
-    ///
-    /// ```
-    /// # use config::configv2::templating::OrTemplated;
-    /// // Value is not present.
-    /// let val = "${count}".parse::<OrTemplated<u8>>().unwrap();
-    /// assert_eq!(val.try_get(), None);
-    /// ```
-    pub fn try_get(&self) -> Option<&T> {
-        self.1.get()
-    }
-
-    /// Attempt to evaluate the value with the provided vars, or return the existing value if it
-    /// has already been evaluated.
-    ///
-    /// # Errors
-    ///
-    /// Returns an `Err` if that value has not already been evaluated, and could not be with the
-    /// given `vars`.
-    ///
-    /// # Examples
-    /// ```
-    /// # use config::configv2::templating::{OrTemplated, TemplateError};
-    /// // Value is already present, no need to eval.
-    /// let val = OrTemplated::new_literal(5u8);
-    /// assert_eq!(val.evaluate(&[].into()), Ok(&5));
-    ///
-    /// // Template needs a var `count`.
-    /// let val = "${count}".parse::<OrTemplated<u8>>().unwrap();
-    ///
-    /// // The needed var was not provided; an error is returned.
-    /// assert_eq!(val.evaluate(&[].into()), Err(TemplateError::VarsNotFound("count".to_owned())));
-    ///
-    /// // The needed var is provided, so that value is evaluated.
-    /// assert_eq!(val.evaluate(&[("count".to_owned(), "19".to_owned())].into()), Ok(&19));
-    ///
-    /// // Now that the value has been evaluated, vars are no longer needed.
-    /// assert_eq!(val.evaluate(&[].into()), Ok(&19));
-    ///
-    /// // The values are not evaluated again if different vars are passed in.
-    /// assert_eq!(val.evaluate(&[("count".to_owned(), "255".to_owned())].into()), Ok(&19));
-    /// ```
-    pub fn evaluate(&self, vars: &Vars) -> Result<&T, TemplateError<T>> {
-        self.1.get_or_try_init(|| {
-            T::from_final_str(&self.0.eval(vars).map_err(TemplateError::VarsNotFound)?)
-        })
-    }
-
-    /// Create a new non-templated value from the provided.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use config::configv2::templating::OrTemplated;
-    /// let val = OrTemplated::new_literal(5u8);
-    ///
-    /// assert_eq!(val.try_get(), Some(&5));
-    /// ```
-    pub fn new_literal(literal: T) -> Self {
-        Self(Template("".to_owned()), OnceCell::with_value(literal))
-    }
-}
-
-impl<T: FromTemplatedStr> FromStr for OrTemplated<T> {
-    type Err = TemplateError<T>;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        T::from_raw_str(s)
-    }
-}
-
-impl<T: FromTemplatedStr> TryFrom<&str> for OrTemplated<T> {
+impl TryFrom<&str> for TemplatedString {
     type Error = <Self as FromStr>::Err;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
@@ -181,107 +158,111 @@ impl<T: FromTemplatedStr> TryFrom<&str> for OrTemplated<T> {
     }
 }
 
-/// Trait for generating types from templated strings.
-pub trait FromTemplatedStr: Sized {
-    type Error: Display;
+#[derive(Debug, PartialEq, Eq, Clone)]
+enum TemplatePiece {
+    Raw(String),
+    Env(String),
+    Var(String),
+    Provider(String),
+}
 
-    /// Generate a `T` from the string, similar to [`FromStr::from_str`].
-    fn from_final_str(s: &str) -> Result<Self, TemplateError<Self>>;
+#[derive(Debug, Deserialize, Clone)]
+enum TemplateTmp<V> {
+    #[serde(rename = "l")]
+    Literal(V),
+    #[serde(rename = "e")]
+    Env(TemplatedString),
+    #[serde(rename = "v")]
+    Vars(TemplatedString),
+    #[serde(rename = "s")]
+    Script(TemplatedString),
+}
 
-    /// Possibly generate a `T` from the templated string. The [`OrTemplated`] may contain the
-    /// final value if the input string is not templated.
-    fn from_raw_str(s: &str) -> Result<OrTemplated<Self>, TemplateError<Self>> {
-        if TEMPLATE_REGEX.is_match(s) {
-            Ok(OrTemplated(Template(s.to_owned()), OnceCell::new()))
-        } else {
-            Self::from_final_str(s).map(OrTemplated::new_literal)
-        }
+#[derive(Debug, PartialEq, Eq, Hash, Error)]
+enum TemplateError {
+    #[error(r#"invalid type tag "{0}" for Template"#)]
+    InvalidTypeTag(&'static str),
+    #[error(r#"invalid template type "{0}" with value "{1}""#)]
+    InvalidTemplateForType(&'static str, String),
+}
+
+fn validate_template_types<T: TemplateType>(
+    t: TemplatedString,
+) -> Result<TemplatedString, TemplateError> {
+    let error =
+        t.0.iter().find_map(|ts| match ts {
+            TemplatePiece::Raw(_) => None,
+            TemplatePiece::Env(e) => (!T::EnvsAllowed::VALUE)
+                .then(|| TemplateError::InvalidTemplateForType("e", e.clone())),
+            TemplatePiece::Var(v) => (!T::VarsAllowed::VALUE)
+                .then(|| TemplateError::InvalidTemplateForType("v", v.clone())),
+            TemplatePiece::Provider(p) => (!T::ProvAllowed::VALUE)
+                .then(|| TemplateError::InvalidTemplateForType("p", p.clone())),
+        });
+    match error {
+        Some(e) => Err(e),
+        None => Ok(t),
     }
 }
 
-/// Error in generating a `T` from a templated string.
-#[derive(Debug, PartialEq, Eq, Error)]
-pub enum TemplateError<T: FromTemplatedStr>
+impl<V, T: TemplateType, ED: Bool, VD: Bool> TryFrom<TemplateTmp<V>> for Template<V, T, ED, VD> {
+    type Error = TemplateError;
+
+    fn try_from(value: TemplateTmp<V>) -> Result<Self, Self::Error> {
+        Ok(match value {
+            TemplateTmp::Literal(x) => Self::Literal { value: x },
+            TemplateTmp::Env(template) => Self::Env {
+                template: validate_template_types::<T>(template)?,
+                __dontuse: TryDefault::try_default()
+                    .map_err(|_| TemplateError::InvalidTypeTag("e"))?,
+            },
+            TemplateTmp::Vars(template) => Self::PreVars {
+                template: validate_template_types::<T>(template)?,
+                __dontuse: TryDefault::try_default()
+                    .map_err(|_| TemplateError::InvalidTypeTag("v"))?,
+            },
+            _ => todo!(),
+        })
+    }
+}
+
+impl<T, U> TryDefault for (T, U)
 where
-    T::Error: Display,
+    T: TryDefault,
+    U: TryDefault,
 {
-    #[error("temple string invalid")]
-    InvalidTemplate,
-    #[error("var {0} not found")]
-    /// Some variable that the templated string requires were not provided.
-    VarsNotFound(String),
-    #[error("from str error: {0}")]
-    /// An error occurred converting the final string to a `T`.
-    FromStrErr(T::Error),
+    fn try_default() -> Result<Self, &'static str> {
+        Ok((T::try_default()?, U::try_default()?))
+    }
 }
 
-impl<T> FromTemplatedStr for T
+impl<T, U, V> TryDefault for (T, U, V)
 where
-    T: FromStr,
-    T::Err: Display,
+    T: TryDefault,
+    U: TryDefault,
+    V: TryDefault,
 {
-    type Error = T::Err;
-
-    fn from_final_str(s: &str) -> Result<Self, TemplateError<Self>> {
-        s.parse().map_err(TemplateError::FromStrErr)
+    fn try_default() -> Result<Self, &'static str> {
+        Ok((T::try_default()?, U::try_default()?, V::try_default()?))
     }
 }
+#[test]
+fn test_new_templates() {
+    serde_yaml::from_str::<Template<i32, EnvsOnly, True, True>>("!l 5").unwrap();
+    serde_yaml::from_str::<Template<i32, VarsOnly, False, False>>("!l 5").unwrap();
+    serde_yaml::from_str::<Template<i32, EnvsOnly>>("!e ${e:HOME}").unwrap();
+    serde_yaml::from_str::<Template<i32, VarsOnly>>("!e ${e:HOME}").unwrap_err();
+    serde_yaml::from_str::<Template<i32, VarsOnly>>("!v ${v:x}").unwrap();
+    serde_yaml::from_str::<Template<i32, Regular>>("!v ${v:x}").unwrap();
+    serde_yaml::from_str::<Template<i32, Regular>>("!v ${e:HOME}").unwrap_err();
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+    let t = "hello".parse::<TemplatedString>().unwrap();
+    assert_eq!(t.0, vec![TemplatePiece::Raw("hello".to_owned())]);
 
-    #[test]
-    fn test_literal_templated() {
-        assert_eq!(i32::from_raw_str("5").unwrap().try_get(), Some(&5));
-        assert_eq!(i32::from_raw_str("-5").unwrap().try_get(), Some(&-5));
-        assert_eq!(i32::from_raw_str("-5").unwrap().try_get(), Some(&-5));
-    }
-
-    #[test]
-    fn test_lazy_template() {
-        let temp = i32::from_raw_str("${some_var}").unwrap();
-        assert_eq!(temp.try_get(), None);
-        assert_eq!(temp.0, Template("${some_var}".to_owned()));
-        assert_eq!(temp.1, OnceCell::new());
-    }
-
-    #[test]
-    fn test_replace_var_not_found() {
-        let temp = i32::from_raw_str("${hello}").unwrap();
-        assert_eq!(temp.try_get(), None);
-        assert_eq!(temp.0, Template("${hello}".to_owned()));
-        assert_eq!(temp.1, OnceCell::new());
-        assert_eq!(
-            temp.evaluate(&BTreeMap::new()),
-            Err(TemplateError::VarsNotFound("hello".to_owned()))
-        );
-    }
-
-    #[test]
-    fn test_replace() {
-        let temp = i32::from_raw_str("${hello}").unwrap();
-        assert_eq!(temp.try_get(), None);
-        assert_eq!(temp.0, Template("${hello}".to_owned()));
-        assert_eq!(temp.1, OnceCell::new());
-        assert_eq!(
-            temp.evaluate(&BTreeMap::from([("hello".to_owned(), "23".to_owned())])),
-            Ok(&23)
-        );
-    }
-
-    #[test]
-    fn test_replace_multi() {
-        let temp = i32::from_raw_str("${hello}3${world}").unwrap();
-        assert_eq!(temp.try_get(), None);
-        assert_eq!(temp.0, Template("${hello}3${world}".to_owned()));
-        assert_eq!(temp.1, OnceCell::new());
-        assert_eq!(
-            temp.evaluate(&BTreeMap::from([
-                ("hello".to_owned(), "12".to_owned()),
-                ("world".to_owned(), "45".to_owned())
-            ])),
-            Ok(&12345)
-        );
-    }
+    let TemplatedString(v) = "${e:HOME}".parse().unwrap();
+    assert_eq!(v, vec![TemplatePiece::Env("HOME".to_owned())]);
+    let TemplatedString(v) = "${v:x}".parse().unwrap();
+    assert_eq!(v, vec![TemplatePiece::Var("x".to_owned())]);
+    let TemplatedString(v) = "${p:foobar}".parse().unwrap();
+    assert_eq!(v, vec![TemplatePiece::Provider("foobar".to_owned())]);
 }

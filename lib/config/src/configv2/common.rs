@@ -1,8 +1,8 @@
-use super::OrTemplated;
+use super::templating::{Regular, Template};
 use serde::Deserialize;
 use std::{collections::BTreeMap, convert::TryFrom, str::FromStr, time::Duration as SDur};
 
-pub type Headers = BTreeMap<String, OrTemplated<String>>;
+pub type Headers = BTreeMap<String, Template<String, Regular>>;
 
 /// Newtype wrapper around [`std::time::Duration`] that allows implementing the needed traits.
 #[derive(Debug, Deserialize, PartialEq, Clone, Copy, Eq)]
@@ -44,23 +44,17 @@ pub enum ProviderSend {
 
 #[cfg(test)]
 mod tests {
-    use super::super::OrTemplated;
     use super::*;
     use serde_yaml::from_str as from_yaml;
 
     #[test]
     fn basic_test_duration() {
-        // Durations
-        type OTD = OrTemplated<Duration>;
-        let dur = from_yaml::<OTD>("1m").unwrap();
-        assert_eq!(dur.try_get(), Some(&Duration::from_secs(60)));
-        let dur = from_yaml::<OTD>("3h1m22s").unwrap();
+        assert_eq!("1m".parse(), Ok(Duration::from_secs(60)));
         assert_eq!(
-            dur.try_get(),
-            Some(&Duration::from_secs(3 * 60 * 60 + 60 + 22))
+            "3h1m22s".parse(),
+            Ok(Duration::from_secs(3 * 60 * 60 + 60 + 22))
         );
-        let dur = from_yaml::<OTD>("5 hrs").unwrap();
-        assert_eq!(dur.try_get(), Some(&Duration::from_secs(5 * 60 * 60)));
+        assert_eq!("5hrs".parse(), Ok(Duration::from_secs(5 * 60 * 60)));
     }
 
     #[test]

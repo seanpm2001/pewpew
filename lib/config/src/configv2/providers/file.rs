@@ -1,9 +1,10 @@
-use super::{BufferLimit, OrTemplated, ProviderSend};
+use super::super::templating::{Template, VarsOnly};
+use super::{BufferLimit, ProviderSend};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize, PartialEq, Eq, Clone)]
 pub struct FileProvider {
-    path: OrTemplated<String>,
+    path: Template<String, VarsOnly>,
     #[serde(default)]
     repeat: bool,
     #[serde(default)]
@@ -210,7 +211,7 @@ mod tests {
 
     #[test]
     fn test_file_provider() {
-        static TEST1: &str = "path: file.txt";
+        static TEST1: &str = "path: !l file.txt";
 
         let FileProvider {
             path,
@@ -221,7 +222,12 @@ mod tests {
             format,
             random,
         } = from_yaml(TEST1).unwrap();
-        assert_eq!(path.try_get(), Some(&"file.txt".to_owned()));
+        assert_eq!(
+            path,
+            Template::Literal {
+                value: "file.txt".to_owned()
+            }
+        );
         assert_eq!(repeat, false);
         assert_eq!(unique, false);
         assert_eq!(auto_return, None);
@@ -230,7 +236,7 @@ mod tests {
         assert_eq!(random, false);
 
         static TEST2: &str = r"
-path: file2.txt
+path: !l file2.txt
 repeat: true
 unique: true
 auto_return: !if_not_full
@@ -248,7 +254,12 @@ random: true
             format,
             random,
         } = from_yaml(TEST2).unwrap();
-        assert_eq!(path.try_get(), Some(&"file2.txt".to_owned()));
+        assert_eq!(
+            path,
+            Template::Literal {
+                value: "file2.txt".to_owned()
+            }
+        );
         assert_eq!(repeat, true);
         assert_eq!(unique, true);
         assert_eq!(auto_return, Some(ProviderSend::IfNotFull));
@@ -257,7 +268,7 @@ random: true
         assert_eq!(random, true);
 
         static TEST3: &str = r"
-path: file3.csv
+path: !l file3.csv
 format: !csv
   headers:
     - foo
@@ -272,7 +283,12 @@ format: !csv
             format,
             random,
         } = from_yaml(TEST3).unwrap();
-        assert_eq!(path.try_get(), Some(&"file3.csv".to_owned()));
+        assert_eq!(
+            path,
+            Template::Literal {
+                value: "file3.csv".to_owned()
+            }
+        );
         assert_eq!(repeat, false);
         assert_eq!(unique, false);
         assert_eq!(auto_return, None);

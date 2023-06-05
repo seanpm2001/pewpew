@@ -1,5 +1,5 @@
 use super::common::Duration;
-use super::OrTemplated;
+use super::templating::{Template, VarsOnly};
 use itertools::Itertools;
 use serde::Deserialize;
 use std::{
@@ -11,6 +11,7 @@ use thiserror::Error;
 /// Percentage type used for pewpew config files. Percentages can be zero, greater than 100, or
 /// fractional, but cannot be negatives, nans, or infinities.
 #[derive(Debug, Deserialize, PartialEq, Clone, Copy)]
+#[serde(try_from = "&str")]
 pub struct Percent(f64);
 
 #[derive(Debug, PartialEq, Eq, Error)]
@@ -55,6 +56,14 @@ impl FromStr for Percent {
     }
 }
 
+impl TryFrom<&str> for Percent {
+    type Error = <Self as FromStr>::Err;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        value.parse()
+    }
+}
+
 /// Defines the load pattern of how heavily pewpew should be hitting the endpoints over time.
 #[derive(Deserialize, Debug, PartialEq)]
 #[serde(from = "Vec<LoadPatternTemp>")]
@@ -67,7 +76,9 @@ impl From<Vec<LoadPatternTemp>> for LoadPattern {
             vec![LoadPatternTemp::Linear {
                 from: None,
                 // This is the important part
-                to: OrTemplated::new_literal(Percent(0.0)),
+                to: Template::Literal {
+                    value: Percent(0.0),
+                },
                 over: "1s".parse().unwrap(),
             }]
             .into_iter()
@@ -90,9 +101,9 @@ impl From<Vec<LoadPatternTemp>> for LoadPattern {
 #[derive(Debug, Clone, PartialEq)]
 pub enum LoadPatternSingle {
     Linear {
-        from: OrTemplated<Percent>,
-        to: OrTemplated<Percent>,
-        over: OrTemplated<Duration>,
+        from: Template<Percent, VarsOnly>,
+        to: Template<Percent, VarsOnly>,
+        over: Duration,
     },
 }
 
@@ -102,14 +113,14 @@ pub enum LoadPatternSingle {
 #[serde(rename_all = "snake_case")]
 enum LoadPatternTemp {
     Linear {
-        from: Option<OrTemplated<Percent>>,
-        to: OrTemplated<Percent>,
-        over: OrTemplated<Duration>,
+        from: Option<Template<Percent, VarsOnly>>,
+        to: Template<Percent, VarsOnly>,
+        over: Duration,
     },
 }
 
 impl LoadPatternTemp {
-    fn into_end(self) -> OrTemplated<Percent> {
+    fn into_end(self) -> Template<Percent, VarsOnly> {
         match self {
             Self::Linear { to, .. } => to,
         }
@@ -124,117 +135,189 @@ mod tests {
     #[test]
     fn test_single_values() {
         // Percents
-        type OTP = OrTemplated<Percent>;
-        let per = from_yaml::<OTP>("1%").unwrap();
-        assert_eq!(per.try_get(), Some(&Percent(0.01)));
+        type TP = Template<Percent, VarsOnly>;
+        let per = from_yaml::<TP>("!l 1%").unwrap();
+        assert_eq!(
+            per,
+            Template::Literal {
+                value: Percent(0.01)
+            }
+        );
 
         // Test fractional percentages
         // Using a sum of powers of 2 for `to` here to prevent float imprecision.
-        let per = from_yaml::<OTP>("106.25%").unwrap();
-        assert_eq!(per.try_get(), Some(&Percent(1.0625)));
+        let per = from_yaml::<TP>("!l 106.25%").unwrap();
+        assert_eq!(
+            per,
+            Template::Literal {
+                value: Percent(1.0625)
+            }
+        );
 
         // Probably shouldn't, but you can
-        let per = from_yaml::<OTP>("1e2%").unwrap();
-        assert_eq!(per.try_get(), Some(&Percent(1.0)));
+        let per = from_yaml::<TP>("!l 1e2%").unwrap();
+        assert_eq!(
+            per,
+            Template::Literal {
+                value: Percent(1.0)
+            }
+        );
 
         // Valid floats, but not valid Percents
 
         // No negatives
         assert_eq!(
-            from_yaml::<OTP>("-100%").unwrap_err().to_string(),
-            "from str error: negative values not allowed"
+            from_yaml::<TP>("!l -100%").unwrap_err().to_string(),
+            "negative values not allowed"
         );
 
         // No infinities, NaNs, or subnormals
         assert_eq!(
-            from_yaml::<OTP>("NAN%").unwrap_err().to_string(),
-            "from str error: abnormal floats (infinity, NaN, etc.) are not valid Percents"
+            from_yaml::<TP>("!l NAN%").unwrap_err().to_string(),
+            "abnormal floats (infinity, NaN, etc.) are not valid Percents"
         );
         assert_eq!(
-            from_yaml::<OTP>("infinity%").unwrap_err().to_string(),
-            "from str error: abnormal floats (infinity, NaN, etc.) are not valid Percents"
+            from_yaml::<TP>("!l infinity%").unwrap_err().to_string(),
+            "abnormal floats (infinity, NaN, etc.) are not valid Percents"
         );
         assert_eq!(
-            from_yaml::<OTP>("1e-308%").unwrap_err().to_string(),
-            "from str error: abnormal floats (infinity, NaN, etc.) are not valid Percents"
+            from_yaml::<TP>("!l 1e-308%").unwrap_err().to_string(),
+            "abnormal floats (infinity, NaN, etc.) are not valid Percents"
         );
 
         // Zero is ok though
-        let per = from_yaml::<OTP>("0%").unwrap();
-        assert_eq!(per.try_get(), Some(&Percent(0.0)));
+        let per = from_yaml::<TP>("!l 0%").unwrap();
+        assert_eq!(
+            per,
+            Template::Literal {
+                value: Percent(0.0)
+            }
+        );
 
         // `%` is required
         assert_eq!(
-            from_yaml::<OTP>("50").unwrap_err().to_string(),
-            "from str error: missing '%' on the percent"
+            from_yaml::<TP>("!l 50").unwrap_err().to_string(),
+            "missing '%' on the percent"
         )
     }
 
     #[test]
     fn test_single_load_pattern() {
         let LoadPatternTemp::Linear { from, to, over } =
-            from_yaml("!linear\n  from: 50%\n  to: 100%\n  over: 5m").unwrap();
+            from_yaml("!linear\n  from: !l 50%\n  to: !l 100%\n  over: 5m").unwrap();
         assert_eq!(
-            from.as_ref().map(OrTemplated::try_get),
-            Some(Some(&Percent(0.5)))
+            from,
+            Some(Template::Literal {
+                value: Percent(0.5)
+            })
         );
-        assert_eq!(to.try_get(), Some(&Percent(1.0)));
-        assert_eq!(over.try_get(), Some(&Duration::from_secs(5 * 60)));
+        assert_eq!(
+            to,
+            Template::Literal {
+                value: Percent(1.0)
+            }
+        );
+        assert_eq!(over, Duration::from_secs(5 * 60));
 
         let LoadPatternTemp::Linear { from, to, over } =
-            from_yaml("!linear\n  to: 20%\n  over: 1s").unwrap();
+            from_yaml("!linear\n  to: !l 20%\n  over: 1s").unwrap();
         assert!(matches!(from, None));
-        assert_eq!(to.try_get(), Some(&Percent(0.2)));
-        assert_eq!(over.try_get(), Some(&Duration::from_secs(1)));
+        assert_eq!(
+            to,
+            Template::Literal {
+                value: Percent(0.2)
+            }
+        );
+        assert_eq!(over, Duration::from_secs(1));
     }
 
     #[test]
     fn test_full_load_pattern() {
         static TEST1: &str = r#"
 - !linear
-    from: 25%
-    to: 100%
+    from: !l 25%
+    to: !l 100%
     over: 1h
         "#;
 
         let load = from_yaml::<LoadPattern>(TEST1).unwrap();
         assert_eq!(load.0.len(), 1);
         let LoadPatternSingle::Linear { from, to, over } = load.0[0].clone();
-        assert_eq!(from.try_get(), Some(&Percent(0.25)));
-        assert_eq!(to.try_get(), Some(&Percent(1.0)));
-        assert_eq!(over.try_get(), Some(&Duration::from_secs(60 * 60)));
+        assert_eq!(
+            from,
+            Template::Literal {
+                value: Percent(0.25)
+            }
+        );
+        assert_eq!(
+            to,
+            Template::Literal {
+                value: Percent(1.0)
+            }
+        );
+        assert_eq!(over, Duration::from_secs(60 * 60));
 
         static TEST2: &str = r#"
  - !linear
-     to: 300%
+     to: !l 300%
      over: 5m
         "#;
 
         let LoadPattern(load) = from_yaml(TEST2).unwrap();
         assert_eq!(load.len(), 1);
         let LoadPatternSingle::Linear { from, to, over } = load[0].clone();
-        assert_eq!(from.try_get(), Some(&Percent(0.0)));
-        assert_eq!(to.try_get(), Some(&Percent(3.0)));
-        assert_eq!(over.try_get(), Some(&Duration::from_secs(5 * 60)));
+        assert_eq!(
+            from,
+            Template::Literal {
+                value: Percent(0.0)
+            }
+        );
+        assert_eq!(
+            to,
+            Template::Literal {
+                value: Percent(3.0)
+            }
+        );
+        assert_eq!(over, Duration::from_secs(5 * 60));
 
         static TEST3: &str = r#"
  - !linear
-     to: 62.5%
+     to: !l 62.5%
      over: 59s
  - !linear
-     to: 87.5%
+     to: !l 87.5%
      over: 22s
         "#;
 
         let LoadPattern(load) = from_yaml(TEST3).unwrap();
         let LoadPatternSingle::Linear { from, to, over } = load[0].clone();
-        assert_eq!(from.try_get(), Some(&Percent(0.0)));
-        assert_eq!(to.try_get(), Some(&Percent(0.625)));
-        assert_eq!(over.try_get(), Some(&Duration::from_secs(59)));
+        assert_eq!(
+            from,
+            Template::Literal {
+                value: Percent(0.0)
+            }
+        );
+        assert_eq!(
+            to,
+            Template::Literal {
+                value: Percent(0.625)
+            }
+        );
+        assert_eq!(over, Duration::from_secs(59));
 
         let LoadPatternSingle::Linear { from, to, over } = load[1].clone();
-        assert_eq!(from.try_get(), Some(&Percent(0.625)));
-        assert_eq!(to.try_get(), Some(&Percent(0.875)));
-        assert_eq!(over.try_get(), Some(&Duration::from_secs(22)));
+        assert_eq!(
+            from,
+            Template::Literal {
+                value: Percent(0.625)
+            }
+        );
+        assert_eq!(
+            to,
+            Template::Literal {
+                value: Percent(0.875)
+            }
+        );
+        assert_eq!(over, Duration::from_secs(22));
     }
 }
