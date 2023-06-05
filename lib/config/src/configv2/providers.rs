@@ -1,6 +1,10 @@
 #![allow(dead_code)]
 
-use super::{common::ProviderSend, templating::Bool};
+use super::{
+    common::ProviderSend,
+    templating::{Bool, False, True},
+    PropagateVars,
+};
 use serde::Deserialize;
 
 mod file;
@@ -20,6 +24,27 @@ pub enum ProviderType<VD: Bool> {
     },
     List(list::ListProvider),
     Range(range::RangeProvider),
+}
+
+impl PropagateVars for ProviderType<False> {
+    type Residual = ProviderType<True>;
+
+    fn insert_vars(self, vars: &super::VarValue<True>) -> Result<Self::Residual, super::VarsError> {
+        match self {
+            Self::File(fp) => fp.insert_vars(vars).map(ProviderType::File),
+            Self::Range(r) => Ok(ProviderType::Range(r)),
+            Self::List(l) => Ok(ProviderType::List(l)),
+            Self::Response {
+                auto_return,
+                buffer,
+                unique,
+            } => Ok(ProviderType::Response {
+                auto_return,
+                buffer,
+                unique,
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq, Default, Clone, Copy)]

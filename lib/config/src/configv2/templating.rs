@@ -1,8 +1,11 @@
+use itertools::Itertools;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::Deserialize;
 use std::{collections::BTreeMap, convert::TryFrom, fmt, str::FromStr};
 use thiserror::Error;
+
+use super::PropagateVars;
 
 #[derive(Default, Deserialize, Debug, PartialEq, Eq, Clone, Copy)]
 pub struct True;
@@ -82,7 +85,7 @@ impl TemplateType for Regular {
 #[derive(Deserialize, Debug, PartialEq, Eq, Clone)]
 #[serde(try_from = "TemplateTmp<V, T>")]
 pub enum Template<
-    V,
+    V: FromStr,
     T: TemplateType,
     VD: Bool, /* = <<T as TemplateType>::VarsAllowed as Bool>::Inverse*/
     ED: Bool = <<T as TemplateType>::EnvsAllowed as Bool>::Inverse,
@@ -126,6 +129,54 @@ impl<VD: Bool> Template<String, EnvsOnly, VD, False> {
     }
 }
 
+impl<V: FromStr, T: TemplateType> Template<V, T, True, True>
+where
+    <T::ProvAllowed as Bool>::Inverse: OK,
+{
+    fn get(&self) -> &V {
+        match self {
+            Self::Literal { value } => value,
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl<V: FromStr, T: TemplateType> PropagateVars for Template<V, T, False, True>
+where
+    T::VarsAllowed: OK,
+    V::Err: std::error::Error + 'static,
+{
+    type Residual = Template<V, T, True, True>;
+
+    fn insert_vars(self, vars: &super::VarValue<True>) -> Result<Self::Residual, super::VarsError> {
+        match self {
+            Self::Literal { value } => Ok(Template::Literal { value }),
+            Self::PreVars {
+                template,
+                __dontuse,
+            } => {
+                let s = template.insert_vars(vars)?;
+                if T::ProvAllowed::VALUE {
+                    Ok(Template::NeedsProviders {
+                        script: s,
+                        __dontuse: TryDefault::try_default().unwrap(),
+                    })
+                } else {
+                    let s = s.try_collect().unwrap();
+                    s.parse()
+                        .map_err(|e: <V as FromStr>::Err| super::VarsError::InvalidString {
+                            typename: std::any::type_name::<V>(),
+                            from: s,
+                            error: e.into(),
+                        })
+                        .map(|v| Template::Literal { value: v })
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 #[error("missing environment variable {0}")]
 pub struct MissingEnvVar(String);
@@ -144,6 +195,36 @@ impl<T: TemplateType> TemplatedString<T> {
                 _ => None,
             })
             .collect()
+    }
+}
+
+impl<T: TemplateType> PropagateVars for TemplatedString<T>
+where
+    T::VarsAllowed: OK,
+{
+    type Residual = Self;
+
+    fn insert_vars(self, vars: &super::VarValue<True>) -> Result<Self::Residual, super::VarsError> {
+        self.0
+            .into_iter()
+            .map(|p| match p {
+                TemplatePiece::Var(v, ..) => {
+                    let path = v.split('.').collect_vec();
+                    path.iter()
+                        .fold(Some(vars), |vars, n| vars.and_then(|v| v.get(n)))
+                        .and_then(super::VarValue::finish)
+                        .map(|vt| match vt {
+                            super::VarTerminal::Num(n) => n.to_string(),
+                            super::VarTerminal::Str(s) => s.get().clone(),
+                            super::VarTerminal::Bool(b) => b.to_string(),
+                        })
+                        .ok_or_else(|| super::VarsError::VarNotFound(v))
+                        .map(TemplatePiece::Raw)
+                }
+                other => Ok(other),
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Self)
     }
 }
 
@@ -264,7 +345,9 @@ fn validate_template_types<T: TemplateType>(
     }
 }
 */
-impl<V, T: TemplateType, ED: Bool, VD: Bool> TryFrom<TemplateTmp<V, T>> for Template<V, T, ED, VD> {
+impl<V: FromStr, T: TemplateType, ED: Bool, VD: Bool> TryFrom<TemplateTmp<V, T>>
+    for Template<V, T, ED, VD>
+{
     type Error = TemplateError;
 
     fn try_from(value: TemplateTmp<V, T>) -> Result<Self, Self::Error> {

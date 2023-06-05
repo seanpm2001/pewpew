@@ -2,7 +2,8 @@
 
 use super::{
     common::{Duration, Headers},
-    templating::Bool,
+    templating::{Bool, False, True},
+    PropagateVars,
 };
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -11,6 +12,17 @@ use std::collections::BTreeMap;
 pub struct Config<VD: Bool> {
     client: Client<VD>,
     general: General,
+}
+
+impl PropagateVars for Config<False> {
+    type Residual = Config<True>;
+
+    fn insert_vars(self, vars: &super::VarValue<True>) -> Result<Self::Residual, super::VarsError> {
+        Ok(Config {
+            client: self.client.insert_vars(vars)?,
+            general: self.general,
+        })
+    }
 }
 
 /// Customization Parameters for the HTTP client
@@ -22,6 +34,23 @@ struct Client<VD: Bool> {
     headers: Headers<VD>,
     #[serde(default = "default_keepalive")]
     keepalive: Duration,
+}
+
+impl PropagateVars for Client<False> {
+    type Residual = Client<True>;
+
+    fn insert_vars(self, vars: &super::VarValue<True>) -> Result<Self::Residual, super::VarsError> {
+        let Self {
+            request_timeout,
+            headers,
+            keepalive,
+        } = self;
+        Ok(Client {
+            request_timeout,
+            headers: headers.insert_vars(vars)?,
+            keepalive,
+        })
+    }
 }
 
 #[derive(Deserialize, Debug, PartialEq, Eq)]

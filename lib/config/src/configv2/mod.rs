@@ -2,7 +2,10 @@
 
 use self::templating::{Bool, EnvsOnly, False, MissingEnvVar, Template, True};
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, HashMap},
+    hash::Hash,
+};
 use thiserror::Error;
 
 pub mod config;
@@ -32,6 +35,22 @@ type Vars<ED> = BTreeMap<String, VarValue<ED>>;
 enum VarValue<ED: Bool> {
     Nested(Vars<ED>),
     Terminal(VarTerminal<ED>),
+}
+
+impl VarValue<True> {
+    fn get(&self, key: &str) -> Option<&Self> {
+        match self {
+            Self::Terminal(..) => None,
+            Self::Nested(v) => v.get(key),
+        }
+    }
+
+    fn finish(&self) -> Option<&VarTerminal<True>> {
+        match self {
+            Self::Terminal(v) => Some(v),
+            Self::Nested(..) => None,
+        }
+    }
 }
 
 fn insert_env_vars(
@@ -117,9 +136,78 @@ impl LoadTest<False, False> {
     }
 }
 
+#[derive(Debug, Error)]
+enum VarsError {
+    #[error("var at path \"{0}\" not found")]
+    VarNotFound(String),
+    #[error("resulting string \"{from}\", was not a valid {typename} ({error})")]
+    InvalidString {
+        typename: &'static str,
+        from: String,
+        #[source]
+        error: Box<dyn std::error::Error>,
+    },
+}
+
 trait PropagateVars {
     // should be same generic type, but with VD as True
     type Residual;
 
-    fn insert_vars(self, vars: &Vars<True>) -> Self::Residual;
+    fn insert_vars(self, vars: &VarValue<True>) -> Result<Self::Residual, VarsError>;
+}
+
+impl PropagateVars for LoadTest<False, True> {
+    type Residual = LoadTest<True, True>;
+
+    fn insert_vars(self, vars: &VarValue<True>) -> Result<Self::Residual, VarsError> {
+        let Self {
+            config,
+            load_pattern,
+            vars,
+            providers,
+            loggers,
+            endpoints,
+        } = self;
+
+        todo!()
+    }
+}
+
+impl<K, V> PropagateVars for BTreeMap<K, V>
+where
+    K: Ord,
+    V: PropagateVars,
+{
+    type Residual = BTreeMap<K, V::Residual>;
+
+    fn insert_vars(self, vars: &VarValue<True>) -> Result<Self::Residual, VarsError> {
+        self.into_iter()
+            .map(|(k, v)| Ok((k, v.insert_vars(vars)?)))
+            .collect()
+    }
+}
+
+impl<K, V> PropagateVars for HashMap<K, V>
+where
+    K: Eq + Hash,
+    V: PropagateVars,
+{
+    type Residual = HashMap<K, V::Residual>;
+
+    fn insert_vars(self, vars: &VarValue<True>) -> Result<Self::Residual, VarsError> {
+        self.into_iter()
+            .map(|(k, v)| Ok((k, v.insert_vars(vars)?)))
+            .collect()
+    }
+}
+
+impl<T> PropagateVars for Vec<T>
+where
+    T: PropagateVars,
+{
+    type Residual = Vec<T::Residual>;
+
+    fn insert_vars(self, vars: &VarValue<True>) -> Result<Self::Residual, VarsError> {
+        self.into_iter().map(|x| x.insert_vars(vars)).collect()
+    }
 }
