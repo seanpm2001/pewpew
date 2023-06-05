@@ -1,6 +1,9 @@
 #![allow(dead_code)]
 
-use super::templating::{Bool, Template, VarsOnly};
+use super::{
+    templating::{Bool, False, Template, True, VarsOnly},
+    PropagateVars,
+};
 use serde::Deserialize;
 // Queries/expressions are handled as regular String values for now.
 
@@ -18,6 +21,22 @@ pub struct Logger<VD: Bool> {
     limit: u64,
     #[serde(default)]
     kill: bool,
+}
+
+impl PropagateVars for Logger<False> {
+    type Residual = Logger<True>;
+
+    fn insert_vars(self, vars: &super::VarValue<True>) -> Result<Self::Residual, super::VarsError> {
+        Ok(Logger {
+            select: self.select,
+            for_each: self.for_each,
+            r#where: self.r#where,
+            to: self.to.insert_vars(vars)?,
+            pretty: self.pretty,
+            limit: self.limit,
+            kill: self.kill,
+        })
+    }
 }
 
 #[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -38,6 +57,23 @@ pub enum LogTo<VD: Bool> {
         to: Template<String, VarsOnly, VD>,
     },
 }
+
+impl PropagateVars for LogTo<False> {
+    type Residual = LogTo<True>;
+
+    fn insert_vars(self, vars: &super::VarValue<True>) -> Result<Self::Residual, super::VarsError> {
+        use LogTo::*;
+        match self {
+            Stderr => Ok(Stderr),
+            Stdout => Ok(Stdout),
+            File { path } => Ok(File {
+                path: path.insert_vars(vars)?,
+            }),
+            Raw { .. } => todo!(),
+        }
+    }
+}
+
 /*
 impl LogTo {
     // "Flattens" a [`LogTo::Raw`] into one of the other options by evaluating the template.

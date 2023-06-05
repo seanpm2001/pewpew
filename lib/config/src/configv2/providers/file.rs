@@ -1,6 +1,7 @@
 use super::super::templating::{Template, VarsOnly};
 use super::{BufferLimit, ProviderSend};
-use crate::configv2::templating::Bool;
+use crate::configv2::templating::{Bool, False, True};
+use crate::configv2::PropagateVars;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize, PartialEq, Eq, Clone)]
@@ -17,6 +18,35 @@ pub struct FileProvider<VD: Bool> {
     format: FileReadFormat,
     #[serde(default)]
     random: bool,
+}
+
+impl PropagateVars for FileProvider<False> {
+    type Residual = FileProvider<True>;
+
+    fn insert_vars(
+        self,
+        vars: &crate::configv2::VarValue<True>,
+    ) -> Result<Self::Residual, crate::configv2::VarsError> {
+        let Self {
+            path,
+            repeat,
+            unique,
+            auto_return,
+            buffer,
+            format,
+            random,
+        } = self;
+
+        Ok(FileProvider {
+            path: path.insert_vars(vars)?,
+            repeat,
+            unique,
+            auto_return,
+            buffer,
+            format,
+            random,
+        })
+    }
 }
 
 /// How the data should be read from the file.

@@ -1,5 +1,6 @@
 use super::common::Duration;
-use super::templating::{Bool, False, Template, VarsOnly};
+use super::templating::{Bool, False, Template, True, VarsOnly};
+use super::PropagateVars;
 use itertools::Itertools;
 use serde::Deserialize;
 use std::{
@@ -70,6 +71,14 @@ impl TryFrom<&str> for Percent {
 #[serde(bound = "Self: From<Vec<LoadPatternTemp>>")]
 pub struct LoadPattern<VD: Bool>(Vec<LoadPatternSingle<VD>>);
 
+impl PropagateVars for LoadPattern<False> {
+    type Residual = LoadPattern<True>;
+
+    fn insert_vars(self, vars: &super::VarValue<True>) -> Result<Self::Residual, super::VarsError> {
+        self.0.insert_vars(vars).map(LoadPattern)
+    }
+}
+
 impl From<Vec<LoadPatternTemp>> for LoadPattern<False> {
     fn from(value: Vec<LoadPatternTemp>) -> Self {
         Self(
@@ -106,6 +115,20 @@ pub enum LoadPatternSingle<VD: Bool> {
         to: Template<Percent, VarsOnly, VD>,
         over: Duration,
     },
+}
+
+impl PropagateVars for LoadPatternSingle<False> {
+    type Residual = LoadPatternSingle<True>;
+
+    fn insert_vars(self, vars: &super::VarValue<True>) -> Result<Self::Residual, super::VarsError> {
+        match self {
+            Self::Linear { from, to, over } => Ok(LoadPatternSingle::Linear {
+                from: from.insert_vars(vars)?,
+                to: to.insert_vars(vars)?,
+                over,
+            }),
+        }
+    }
 }
 
 /// This temporary is used because `from` defaults to the `to` value of the previous, and that

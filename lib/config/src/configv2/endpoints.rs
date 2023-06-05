@@ -3,7 +3,8 @@
 use super::{
     common::{Duration, Headers},
     load_pattern::LoadPattern,
-    templating::{Bool, Regular, Template, VarsOnly},
+    templating::{Bool, False, Regular, Template, True, VarsOnly},
+    PropagateVars,
 };
 use derive_more::{Deref, FromStr};
 use serde::Deserialize;
@@ -65,11 +66,36 @@ enum EndPointBody<VD: Bool> {
     Multipart(HashMap<String, MultiPartBodySection<VD>>),
 }
 
+impl PropagateVars for EndPointBody<False> {
+    type Residual = EndPointBody<True>;
+
+    fn insert_vars(self, vars: &super::VarValue<True>) -> Result<Self::Residual, super::VarsError> {
+        use EndPointBody::*;
+        match self {
+            String(s) => s.insert_vars(vars).map(String),
+            File(f) => f.insert_vars(vars).map(File),
+            Multipart(mp) => mp.insert_vars(vars).map(Multipart),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 struct MultiPartBodySection<VD: Bool> {
     #[serde(default = "BTreeMap::new")]
     headers: Headers<VD>,
     body: EndPointBody<VD>,
+}
+
+impl PropagateVars for MultiPartBodySection<False> {
+    type Residual = MultiPartBodySection<True>;
+
+    fn insert_vars(self, vars: &super::VarValue<True>) -> Result<Self::Residual, super::VarsError> {
+        let Self { headers, body } = self;
+        Ok(MultiPartBodySection {
+            headers: headers.insert_vars(vars)?,
+            body: body.insert_vars(vars)?,
+        })
+    }
 }
 
 #[derive(Debug, Deserialize, PartialEq, PartialOrd, Deref)]
