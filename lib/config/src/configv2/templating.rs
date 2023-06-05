@@ -109,19 +109,26 @@ impl<VD: Bool> Template<String, EnvsOnly, VD, False> {
     pub(crate) fn insert_env_vars(
         self,
         evars: &BTreeMap<String, String>,
-    ) -> Option<Template<String, EnvsOnly, VD, True>> {
+    ) -> Result<Template<String, EnvsOnly, VD, True>, MissingEnvVar> {
         match self {
-            Self::Literal { value } => Some(Template::Literal { value }),
+            Self::Literal { value } => Ok(Template::Literal { value }),
             Self::Env {
                 template,
                 __dontuse,
-            } => Some(Template::Literal {
-                value: template.insert_env_vars(evars)?.try_collect()?,
+            } => Ok(Template::Literal {
+                value: template
+                    .insert_env_vars(evars)?
+                    .try_collect()
+                    .expect("EnvsOnly shouldn't have other types"),
             }),
-            _ => todo!(),
+            _ => unreachable!(),
         }
     }
 }
+
+#[derive(Debug, Error)]
+#[error("missing environment variable {0}")]
+pub struct MissingEnvVar(String);
 
 #[derive(Debug, PartialEq, Eq, Deserialize, Clone)]
 #[serde(try_from = "&str")]
@@ -144,14 +151,18 @@ impl<T: TemplateType> TemplatedString<T>
 where
     T::EnvsAllowed: OK,
 {
-    fn insert_env_vars(self, evars: &BTreeMap<String, String>) -> Option<Self> {
+    fn insert_env_vars(self, evars: &BTreeMap<String, String>) -> Result<Self, MissingEnvVar> {
         self.0
             .into_iter()
             .map(|p| match p {
-                TemplatePiece::Env(e, ..) => Some(TemplatePiece::<T>::Raw(evars.get(&e)?.clone())),
-                other => Some(other),
+                TemplatePiece::Env(e, ..) => evars
+                    .get(&e)
+                    .cloned()
+                    .map(TemplatePiece::Raw)
+                    .ok_or_else(|| MissingEnvVar(e)),
+                other => Ok(other),
             })
-            .collect::<Option<Vec<_>>>()
+            .collect::<Result<Vec<_>, _>>()
             .map(Self)
     }
 }
