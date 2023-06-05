@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use super::common::ProviderSend;
+use super::{common::ProviderSend, templating::Bool};
 use serde::Deserialize;
 
 mod file;
@@ -9,8 +9,8 @@ mod range;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ProviderType {
-    File(file::FileProvider),
+pub enum ProviderType<VD: Bool> {
+    File(file::FileProvider<VD>),
     Response {
         auto_return: Option<ProviderSend>,
         #[serde(default)]
@@ -57,6 +57,8 @@ enum Auto {
 
 #[cfg(test)]
 mod tests {
+    use crate::configv2::templating::False;
+
     use super::*;
     use serde_yaml::from_str as from_yaml;
 
@@ -73,7 +75,7 @@ mod tests {
     fn test_provider_type_response() {
         static TEST1: &str = "!response";
 
-        let ProviderType::Response {
+        let ProviderType::<False>::Response {
             auto_return,
             buffer,
             unique,
@@ -91,7 +93,7 @@ mod tests {
   unique: true
         "#;
 
-        let ProviderType::Response {
+        let ProviderType::<False>::Response {
             auto_return,
             buffer,
             unique,
@@ -119,7 +121,7 @@ mod tests {
     comment: "#"
     headers: true"##;
 
-        let ProviderType::File(_) = from_yaml(TEST_FILE).unwrap() else {
+        let ProviderType::<False>::File(_) = from_yaml(TEST_FILE).unwrap() else {
             panic!("was not file provider")
         };
 
@@ -129,7 +131,7 @@ mod tests {
   - b
         "##;
 
-        let ProviderType::List(_) = from_yaml(TEST_LIST).unwrap() else {
+        let ProviderType::<False>::List(_) = from_yaml(TEST_LIST).unwrap() else {
             panic!("was not list provider")
         };
 
@@ -138,7 +140,7 @@ mod tests {
   start: 15
         "#;
 
-        let ProviderType::Range(_) = from_yaml(TEST_RANGE).unwrap() else {
+        let ProviderType::<False>::Range(_) = from_yaml(TEST_RANGE).unwrap() else {
             panic!("was not range")
         };
     }

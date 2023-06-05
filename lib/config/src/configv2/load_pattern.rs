@@ -1,5 +1,5 @@
 use super::common::Duration;
-use super::templating::{Template, VarsOnly};
+use super::templating::{Bool, False, Template, VarsOnly};
 use itertools::Itertools;
 use serde::Deserialize;
 use std::{
@@ -67,9 +67,10 @@ impl TryFrom<&str> for Percent {
 /// Defines the load pattern of how heavily pewpew should be hitting the endpoints over time.
 #[derive(Deserialize, Debug, PartialEq)]
 #[serde(from = "Vec<LoadPatternTemp>")]
-pub struct LoadPattern(Vec<LoadPatternSingle>);
+#[serde(bound = "Self: From<Vec<LoadPatternTemp>>")]
+pub struct LoadPattern<VD: Bool>(Vec<LoadPatternSingle<VD>>);
 
-impl From<Vec<LoadPatternTemp>> for LoadPattern {
+impl From<Vec<LoadPatternTemp>> for LoadPattern<False> {
     fn from(value: Vec<LoadPatternTemp>) -> Self {
         Self(
             // Dummy value at the start is because `from` defaults to 0 if there is no previous
@@ -99,10 +100,10 @@ impl From<Vec<LoadPatternTemp>> for LoadPattern {
 
 /// Single segment of a [`LoadPattern`], defining the shape and duration.
 #[derive(Debug, Clone, PartialEq)]
-pub enum LoadPatternSingle {
+pub enum LoadPatternSingle<VD: Bool> {
     Linear {
-        from: Template<Percent, VarsOnly>,
-        to: Template<Percent, VarsOnly>,
+        from: Template<Percent, VarsOnly, VD>,
+        to: Template<Percent, VarsOnly, VD>,
         over: Duration,
     },
 }
@@ -113,14 +114,14 @@ pub enum LoadPatternSingle {
 #[serde(rename_all = "snake_case")]
 enum LoadPatternTemp {
     Linear {
-        from: Option<Template<Percent, VarsOnly>>,
-        to: Template<Percent, VarsOnly>,
+        from: Option<Template<Percent, VarsOnly, False>>,
+        to: Template<Percent, VarsOnly, False>,
         over: Duration,
     },
 }
 
 impl LoadPatternTemp {
-    fn into_end(self) -> Template<Percent, VarsOnly> {
+    fn into_end(self) -> Template<Percent, VarsOnly, False> {
         match self {
             Self::Linear { to, .. } => to,
         }
@@ -129,13 +130,15 @@ impl LoadPatternTemp {
 
 #[cfg(test)]
 mod tests {
+    use crate::configv2::templating::False;
+
     use super::*;
     use serde_yaml::from_str as from_yaml;
 
     #[test]
     fn test_single_values() {
         // Percents
-        type TP = Template<Percent, VarsOnly>;
+        type TP = Template<Percent, VarsOnly, False>;
         let per = from_yaml::<TP>("!l 1%").unwrap();
         assert_eq!(
             per,
@@ -240,7 +243,7 @@ mod tests {
     over: 1h
         "#;
 
-        let load = from_yaml::<LoadPattern>(TEST1).unwrap();
+        let load = from_yaml::<LoadPattern<False>>(TEST1).unwrap();
         assert_eq!(load.0.len(), 1);
         let LoadPatternSingle::Linear { from, to, over } = load.0[0].clone();
         assert_eq!(
@@ -263,7 +266,7 @@ mod tests {
      over: 5m
         "#;
 
-        let LoadPattern(load) = from_yaml(TEST2).unwrap();
+        let LoadPattern::<False>(load) = from_yaml(TEST2).unwrap();
         assert_eq!(load.len(), 1);
         let LoadPatternSingle::Linear { from, to, over } = load[0].clone();
         assert_eq!(
@@ -289,7 +292,7 @@ mod tests {
      over: 22s
         "#;
 
-        let LoadPattern(load) = from_yaml(TEST3).unwrap();
+        let LoadPattern::<False>(load) = from_yaml(TEST3).unwrap();
         let LoadPatternSingle::Linear { from, to, over } = load[0].clone();
         assert_eq!(
             from,

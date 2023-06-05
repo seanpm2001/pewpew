@@ -3,7 +3,7 @@
 use super::{
     common::{Duration, Headers},
     load_pattern::LoadPattern,
-    templating::{Regular, Template, VarsOnly},
+    templating::{Bool, Regular, Template, VarsOnly},
 };
 use derive_more::{Deref, FromStr};
 use serde::Deserialize;
@@ -14,19 +14,20 @@ use std::{
 };
 
 #[derive(Debug, Deserialize)]
-pub struct Endpoint {
+pub struct Endpoint<VD: Bool> {
     #[serde(default)]
     declare: BTreeMap<String, String>, // expressions are still Strings for now
-    #[serde(default)]
-    headers: Headers,
-    body: Option<EndPointBody>,
-    load_pattern: Option<LoadPattern>,
+    #[serde(default = "BTreeMap::new")]
+    headers: Headers<VD>,
+    body: Option<EndPointBody<VD>>,
+    #[serde(bound = "LoadPattern<VD>: serde::de::DeserializeOwned")]
+    load_pattern: Option<LoadPattern<VD>>,
     #[serde(default)]
     method: Method,
-    peak_load: Option<Template<HitsPerMinute, VarsOnly>>,
-    #[serde(default)]
-    tags: BTreeMap<String, Template<String, Regular>>,
-    url: Template<String, Regular>,
+    peak_load: Option<Template<HitsPerMinute, VarsOnly, VD>>,
+    #[serde(default = "BTreeMap::new")]
+    tags: BTreeMap<String, Template<String, Regular, VD>>,
+    url: Template<String, Regular, VD>,
     #[serde(default)]
     provides: BTreeMap<String, EndpointProvides>,
     // book says optional, check what the behavior should be and if this
@@ -57,18 +58,18 @@ impl TryFrom<&str> for Method {
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "type", content = "content")]
-enum EndPointBody {
+enum EndPointBody<VD: Bool> {
     #[serde(rename = "str")]
-    String(Template<String, Regular>),
-    File(Template<String, Regular>),
-    Multipart(HashMap<String, MultiPartBodySection>),
+    String(Template<String, Regular, VD>),
+    File(Template<String, Regular, VD>),
+    Multipart(HashMap<String, MultiPartBodySection<VD>>),
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
-struct MultiPartBodySection {
-    #[serde(default)]
-    headers: Headers,
-    body: EndPointBody,
+struct MultiPartBodySection<VD: Bool> {
+    #[serde(default = "BTreeMap::new")]
+    headers: Headers<VD>,
+    body: EndPointBody<VD>,
 }
 
 #[derive(Debug, Deserialize, PartialEq, PartialOrd, Deref)]
@@ -118,6 +119,7 @@ struct EndpointLogs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::configv2::False;
     use serde_yaml::from_str as from_yaml;
 
     #[test]
@@ -141,7 +143,7 @@ mod tests {
 
     #[test]
     fn test_body() {
-        let EndPointBody::String(body) = from_yaml("type: str\ncontent: !l my text").unwrap() else {
+        let EndPointBody::<False>::String(body) = from_yaml("type: str\ncontent: !l my text").unwrap() else {
             panic!("was not template variant")
         };
         assert_eq!(
@@ -151,7 +153,7 @@ mod tests {
             }
         );
 
-        let EndPointBody::File(file) = from_yaml("type: file\ncontent: !l body.txt").unwrap() else {
+        let EndPointBody::<False>::File(file) = from_yaml("type: file\ncontent: !l body.txt").unwrap() else {
             panic!("was not file variant")
         };
         assert_eq!(
@@ -174,7 +176,7 @@ content:
     body:
       type: str
       content: !l some text"#;
-        let EndPointBody::Multipart(multipart) = from_yaml(TEST).unwrap() else {
+        let EndPointBody::<False>::Multipart(multipart) = from_yaml(TEST).unwrap() else {
             panic!("was not multipart variant")
         };
         assert_eq!(multipart.len(), 2);
@@ -238,7 +240,7 @@ content:
     #[test]
     fn test_endpoint() {
         static TEST: &str = r#"url: !l example.com"#;
-        let Endpoint {
+        let Endpoint::<False> {
             declare,
             headers,
             body,
