@@ -1,9 +1,9 @@
 #![allow(dead_code)]
 
+use self::templating::{Bool, EnvsOnly, False, MissingEnvVar, Template, True};
 use serde::Deserialize;
 use std::collections::BTreeMap;
-
-use self::templating::{Bool, EnvsOnly, False, Template, True};
+use thiserror::Error;
 
 pub mod config;
 pub mod endpoints;
@@ -34,9 +34,12 @@ enum VarValue<ED: Bool> {
     Terminal(VarTerminal<ED>),
 }
 
-fn insert_env_vars(v: Vars<False>, evars: &BTreeMap<String, String>) -> Option<Vars<True>> {
+fn insert_env_vars(
+    v: Vars<False>,
+    evars: &BTreeMap<String, String>,
+) -> Result<Vars<True>, MissingEnvVar> {
     v.into_iter()
-        .map(|(k, v)| Some((k, v.insert_env_vars(evars)?)))
+        .map(|(k, v)| Ok((k, v.insert_env_vars(evars)?)))
         .collect()
 }
 
@@ -49,17 +52,23 @@ enum VarTerminal<ED: Bool> {
 }
 
 impl VarTerminal<False> {
-    fn insert_env_vars(self, evars: &BTreeMap<String, String>) -> Option<VarTerminal<True>> {
+    fn insert_env_vars(
+        self,
+        evars: &BTreeMap<String, String>,
+    ) -> Result<VarTerminal<True>, MissingEnvVar> {
         match self {
-            Self::Num(n) => Some(VarTerminal::Num(n)),
-            Self::Bool(b) => Some(VarTerminal::Bool(b)),
+            Self::Num(n) => Ok(VarTerminal::Num(n)),
+            Self::Bool(b) => Ok(VarTerminal::Bool(b)),
             Self::Str(template) => template.insert_env_vars(evars).map(VarTerminal::Str),
         }
     }
 }
 
 impl VarValue<False> {
-    fn insert_env_vars(self, evars: &BTreeMap<String, String>) -> Option<VarValue<True>> {
+    fn insert_env_vars(
+        self,
+        evars: &BTreeMap<String, String>,
+    ) -> Result<VarValue<True>, MissingEnvVar> {
         match self {
             Self::Nested(v) => insert_env_vars(v, evars).map(VarValue::Nested),
             Self::Terminal(t) => t.insert_env_vars(evars).map(VarValue::Terminal),
@@ -67,17 +76,28 @@ impl VarValue<False> {
     }
 }
 
+#[derive(Debug, Error)]
+pub enum LoadTestGenError {
+    #[error("error parsing yaml: {0}")]
+    YamlParse(#[from] serde_yaml::Error),
+    #[error("{0}")]
+    MissingEnvVar(#[from] MissingEnvVar),
+}
+
 impl LoadTest<True, True> {
-    pub fn from_yaml(yaml: &str) -> Result<Self, serde_yaml::Error> {
+    pub fn from_yaml(yaml: &str) -> Result<Self, LoadTestGenError> {
         let pre_envs: LoadTest<False, False> = serde_yaml::from_str(yaml)?;
         let env_vars = std::env::vars().collect::<BTreeMap<_, _>>();
-        let pre_vars = pre_envs.insert_env_vars(&env_vars);
+        let pre_vars = pre_envs.insert_env_vars(&env_vars)?;
         todo!()
     }
 }
 
 impl LoadTest<False, False> {
-    fn insert_env_vars(self, evars: &BTreeMap<String, String>) -> Option<LoadTest<False, True>> {
+    fn insert_env_vars(
+        self,
+        evars: &BTreeMap<String, String>,
+    ) -> Result<LoadTest<False, True>, MissingEnvVar> {
         let Self {
             config,
             load_pattern,
@@ -86,7 +106,7 @@ impl LoadTest<False, False> {
             loggers,
             endpoints,
         } = self;
-        Some(LoadTest {
+        Ok(LoadTest {
             config,
             load_pattern,
             vars: insert_env_vars(vars, evars)?,
