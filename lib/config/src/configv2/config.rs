@@ -1,21 +1,25 @@
 #![allow(dead_code)]
 
-use super::common::{Duration, Headers};
+use super::{
+    common::{Duration, Headers},
+    templating::Bool,
+};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 
 #[derive(Deserialize, Debug, PartialEq, Eq)]
-pub struct Config {
-    client: Client,
+pub struct Config<VD: Bool> {
+    client: Client<VD>,
     general: General,
 }
 
 /// Customization Parameters for the HTTP client
 #[derive(Deserialize, Debug, PartialEq, Eq)]
-struct Client {
+struct Client<VD: Bool> {
     #[serde(default = "default_timeout")]
     request_timeout: Duration,
-    #[serde(default)]
-    headers: Headers,
+    #[serde(default = "BTreeMap::new")]
+    headers: Headers<VD>,
     #[serde(default = "default_keepalive")]
     keepalive: Duration,
 }
@@ -54,13 +58,13 @@ const fn default_log_provider_stats() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::configv2::templating::Template;
+    use crate::configv2::templating::{False, Template};
     use serde_yaml::from_str as from_yaml;
 
     #[test]
     fn test_client() {
         static TEST1: &str = "";
-        let Client {
+        let Client::<False> {
             request_timeout,
             headers,
             keepalive,
@@ -76,7 +80,7 @@ headers:
 keepalive: 19s
         "#;
 
-        let Client {
+        let Client::<False> {
             request_timeout,
             headers,
             keepalive,
@@ -128,7 +132,7 @@ watch_transition_time: 23s
     fn test_config() {
         static TEST1: &str = "client: {}\ngeneral: {}";
         let Config { client, general } = from_yaml(TEST1).unwrap();
-        assert_eq!(client, from_yaml::<Client>("").unwrap());
+        assert_eq!(client, from_yaml::<Client<False>>("").unwrap());
         assert_eq!(general, from_yaml::<General>("").unwrap());
 
         static TEST2: &str = r#"
@@ -137,7 +141,7 @@ client:
 general:
   bucket_size: 1 hour
         "#;
-        let Config { client, general } = from_yaml(TEST2).unwrap();
+        let Config::<False> { client, general } = from_yaml(TEST2).unwrap();
         assert_eq!(client.request_timeout, Duration::from_secs(89));
         assert_eq!(general.bucket_size, Duration::from_secs(3600));
     }

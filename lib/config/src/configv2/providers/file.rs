@@ -1,10 +1,11 @@
 use super::super::templating::{Template, VarsOnly};
 use super::{BufferLimit, ProviderSend};
+use crate::configv2::templating::Bool;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize, PartialEq, Eq, Clone)]
-pub struct FileProvider {
-    path: Template<String, VarsOnly>,
+pub struct FileProvider<VD: Bool> {
+    path: Template<String, VarsOnly, VD>,
     #[serde(default)]
     repeat: bool,
     #[serde(default)]
@@ -96,6 +97,8 @@ impl From<Option<char>> for CsvLineTerminator {
 
 #[cfg(test)]
 mod tests {
+    use crate::configv2::templating::False;
+
     use super::*;
     use serde_yaml::from_str as from_yaml;
 
@@ -213,7 +216,7 @@ mod tests {
     fn test_file_provider() {
         static TEST1: &str = "path: !l file.txt";
 
-        let FileProvider {
+        let FileProvider::<False> {
             path,
             repeat,
             unique,
@@ -245,7 +248,7 @@ format: !json
 random: true
         ";
 
-        let FileProvider {
+        let FileProvider::<False> {
             path,
             repeat,
             unique,
@@ -274,7 +277,7 @@ format: !csv
     - foo
     - bar";
 
-        let FileProvider {
+        let FileProvider::<False> {
             path,
             repeat,
             unique,

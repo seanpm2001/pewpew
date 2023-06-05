@@ -2,7 +2,7 @@ use super::templating::{Regular, Template};
 use serde::Deserialize;
 use std::{collections::BTreeMap, convert::TryFrom, str::FromStr, time::Duration as SDur};
 
-pub type Headers = BTreeMap<String, Template<String, Regular>>;
+pub type Headers<VD> = BTreeMap<String, Template<String, Regular, VD>>;
 
 /// Newtype wrapper around [`std::time::Duration`] that allows implementing the needed traits.
 #[derive(Debug, Deserialize, PartialEq, Clone, Copy, Eq)]
