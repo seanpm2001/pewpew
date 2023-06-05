@@ -3,7 +3,7 @@
 use super::{
     common::{Duration, Headers},
     load_pattern::LoadPattern,
-    OrTemplated,
+    templating::{Regular, Template, VarsOnly},
 };
 use derive_more::{Deref, FromStr};
 use serde::Deserialize;
@@ -23,10 +23,10 @@ pub struct Endpoint {
     load_pattern: Option<LoadPattern>,
     #[serde(default)]
     method: Method,
-    peak_load: Option<OrTemplated<HitsPerMinute>>,
+    peak_load: Option<Template<HitsPerMinute, VarsOnly>>,
     #[serde(default)]
-    tags: BTreeMap<String, OrTemplated<String>>,
-    url: OrTemplated<String>,
+    tags: BTreeMap<String, Template<String, Regular>>,
+    url: Template<String, Regular>,
     #[serde(default)]
     provides: BTreeMap<String, EndpointProvides>,
     // book says optional, check what the behavior should be and if this
@@ -53,18 +53,15 @@ impl TryFrom<&str> for Method {
     }
 }
 
-// maybe make this one a Tmp, and the real one just has three tuple variants
-// or turn the whole thing into a type-tagged, and get rid of the just a string deserialization
+// Error("deserializing nested enum in EndPointBody::str from YAML is not supported yet", line: 1, column: 1)
 #[derive(Debug, Deserialize, PartialEq, Eq)]
-#[serde(untagged)]
+#[serde(rename_all = "snake_case")]
+#[serde(tag = "type", content = "content")]
 enum EndPointBody {
-    Template(OrTemplated<String>),
-    File {
-        file: OrTemplated<String>,
-    },
-    Multipart {
-        multipart: HashMap<String, MultiPartBodySection>,
-    },
+    #[serde(rename = "str")]
+    String(Template<String, Regular>),
+    File(Template<String, Regular>),
+    Multipart(HashMap<String, MultiPartBodySection>),
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -144,26 +141,40 @@ mod tests {
 
     #[test]
     fn test_body() {
-        let EndPointBody::Template(body) = from_yaml("my text").unwrap() else {
+        let EndPointBody::String(body) = from_yaml("type: str\ncontent: !l my text").unwrap() else {
             panic!("was not template variant")
         };
-        assert_eq!(body, OrTemplated::new_literal("my text".to_owned()));
+        assert_eq!(
+            body,
+            Template::Literal {
+                value: "my text".to_owned()
+            }
+        );
 
-        let EndPointBody::File { file } = from_yaml("file: body.txt").unwrap() else {
+        let EndPointBody::File(file) = from_yaml("type: file\ncontent: !l body.txt").unwrap() else {
             panic!("was not file variant")
         };
-        assert_eq!(file, OrTemplated::new_literal("body.txt".to_owned()));
+        assert_eq!(
+            file,
+            Template::Literal {
+                value: "body.txt".to_owned()
+            }
+        );
 
         static TEST: &str = r#"
-multipart:
+type: multipart
+content:
   foo:
     headers:
-      Content-Type: image/jpeg
+      Content-Type: !l image/jpeg
     body:
-      file: foo.jpg
+      type: file
+      content: !l foo.jpg
   bar:
-    body: some text"#;
-        let EndPointBody::Multipart { multipart } = from_yaml(TEST).unwrap() else {
+    body:
+      type: str
+      content: !l some text"#;
+        let EndPointBody::Multipart(multipart) = from_yaml(TEST).unwrap() else {
             panic!("was not multipart variant")
         };
         assert_eq!(multipart.len(), 2);
@@ -172,19 +183,23 @@ multipart:
             MultiPartBodySection {
                 headers: [(
                     "Content-Type".to_owned(),
-                    OrTemplated::new_literal("image/jpeg".to_owned())
+                    Template::Literal {
+                        value: "image/jpeg".to_owned()
+                    }
                 )]
                 .into(),
-                body: EndPointBody::File {
-                    file: OrTemplated::new_literal("foo.jpg".to_owned())
-                }
+                body: EndPointBody::File(Template::Literal {
+                    value: "foo.jpg".to_owned()
+                })
             }
         );
         assert_eq!(
             multipart["bar"],
             MultiPartBodySection {
                 headers: Default::default(),
-                body: EndPointBody::Template(OrTemplated::new_literal("some text".to_owned()))
+                body: EndPointBody::String(Template::Literal {
+                    value: "some text".to_owned()
+                })
             }
         );
     }
@@ -222,7 +237,7 @@ multipart:
 
     #[test]
     fn test_endpoint() {
-        static TEST: &str = r#"url: example.com"#;
+        static TEST: &str = r#"url: !l example.com"#;
         let Endpoint {
             declare,
             headers,
@@ -246,7 +261,12 @@ multipart:
         assert_eq!(*method, http::Method::GET);
         assert_eq!(peak_load, None);
         assert!(tags.is_empty());
-        assert_eq!(url, OrTemplated::new_literal("example.com".to_owned()));
+        assert_eq!(
+            url,
+            Template::Literal {
+                value: "example.com".to_owned()
+            }
+        );
         assert!(provides.is_empty());
         assert_eq!(on_demand, None);
         assert!(logs.is_empty());

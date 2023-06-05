@@ -54,7 +54,7 @@ const fn default_log_provider_stats() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::configv2::OrTemplated;
+    use crate::configv2::templating::Template;
     use serde_yaml::from_str as from_yaml;
 
     #[test]
@@ -72,7 +72,7 @@ mod tests {
         static TEST2: &str = r#"
 request_timeout: 23s
 headers:
-  one: two
+  one: !l two
 keepalive: 19s
         "#;
 
@@ -83,7 +83,12 @@ keepalive: 19s
         } = from_yaml(TEST2).unwrap();
         assert_eq!(request_timeout, Duration::from_secs(23));
         assert_eq!(headers.len(), 1);
-        assert_eq!(headers["one"], OrTemplated::new_literal("two".to_owned()));
+        assert_eq!(
+            headers["one"],
+            Template::Literal {
+                value: "two".to_owned()
+            }
+        );
         assert_eq!(keepalive, Duration::from_secs(19));
     }
 

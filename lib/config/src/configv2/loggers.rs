@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use super::OrTemplated;
+use super::templating::{Template, VarsOnly};
 use serde::Deserialize;
 // Queries/expressions are handled as regular String values for now.
 
@@ -22,33 +22,39 @@ pub struct Logger {
 
 #[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[serde(tag = "type")]
 pub enum LogTo {
     Stdout,
     Stderr,
-    File(OrTemplated<String>),
+    File {
+        path: Template<String, VarsOnly>,
+    },
     /// Allows templating of non-file paths, similar to the legacy parser. Literal string values of
     /// "stdout" and "stderr" will redirect to the corresponding target, where anything else will
     /// be a file of that name.
     ///
     /// Make sure to be extra cautious about spelling the sentinel values correctly.
-    Raw(OrTemplated<String>),
+    Raw {
+        to: Template<String, VarsOnly>,
+    },
 }
 
 impl LogTo {
-    /// "Flattens" a [`LogTo::Raw`] into one of the other options by evaluating the template.
-    fn flatten_raw(
+    // "Flattens" a [`LogTo::Raw`] into one of the other options by evaluating the template.
+    /*fn flatten_raw(
         &self,
-        vars: &super::templating::Vars,
+        _vars: &super::templating::Vars,
     ) -> Result<Self, super::templating::TemplateError<String>> {
-        match self {
+        /*match self {
             Self::Raw(ots) => match ots.evaluate(vars)?.as_str() {
                 "stdout" => Ok(Self::Stdout),
                 "stderr" => Ok(Self::Stderr),
                 other => Ok(Self::File(OrTemplated::new_literal(other.to_owned()))),
             },
             other => Ok(other.clone()),
-        }
-    }
+        }*/
+        todo!()
+    }*/
 }
 
 #[cfg(test)]
@@ -58,20 +64,26 @@ mod tests {
 
     #[test]
     fn test_log_to_basic() {
-        let to = from_yaml::<LogTo>("!stdout").unwrap();
+        let to = from_yaml::<LogTo>("type: stdout").unwrap();
         assert_eq!(to, LogTo::Stdout);
-        let to = from_yaml::<LogTo>("!stderr").unwrap();
+        let to = from_yaml::<LogTo>("type: stderr").unwrap();
         assert_eq!(to, LogTo::Stderr);
-        let to = from_yaml::<LogTo>("!file out.txt").unwrap();
+        // Error("path: untagged and internally tagged enums do not support enum input")
+        //let to = from_yaml::<LogTo>("type: file\npath: !l out.txt).unwrap();
+        let to = from_yaml::<LogTo>("type: file\npath: {\"l\": \"out.txt\"}").unwrap();
         assert_eq!(
             to,
-            LogTo::File(OrTemplated::new_literal("out.txt".to_owned()))
+            LogTo::File {
+                path: Template::Literal {
+                    value: "out.txt".to_owned()
+                }
+            }
         );
-        assert!(from_yaml::<LogTo>("!stder").is_err());
+        assert!(from_yaml::<LogTo>("type: stder").is_err());
     }
 
     // This test may need to be rewritten when the templating/vars structure is changed
-    #[test]
+    /*#[test]
     fn test_log_to_raw() {
         let to = from_yaml::<LogTo>("!raw stdout").unwrap();
         assert_eq!(to.flatten_raw(&[].into()), Ok(LogTo::Stdout));
@@ -87,11 +99,11 @@ mod tests {
             to.flatten_raw(&[].into()),
             Ok(LogTo::File(OrTemplated::new_literal("stder".to_owned())))
         );
-    }
+    }*/
 
     #[test]
     fn test_logger_defaults() {
-        let logger = from_yaml::<Logger>("to: !stdout").unwrap();
+        let logger = from_yaml::<Logger>("to:\n  type: stdout").unwrap();
         assert_eq!(logger.select, None);
         assert_eq!(logger.for_each, None);
         assert_eq!(logger.r#where, None);
