@@ -379,7 +379,7 @@ mod tests {
             "${e:HOME}/file.txt".parse::<TemplatedString<EnvsOnly>>(),
             Ok(TemplatedString(vec![
                 TemplatePiece::Env("HOME".to_owned(), TryDefault::try_default().unwrap()),
-                TemplatePiece::Raw("file.txt".to_owned()),
+                TemplatePiece::Raw("/file.txt".to_owned()),
             ]))
         );
     }
