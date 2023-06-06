@@ -10,6 +10,7 @@ doctest = false
 
 [dependencies]
 base64 = "0.21"
+derivative = "2.2.0"
 derive_more = "0.99.17"
 ether = { path = "../either" }
 futures = "0.3"

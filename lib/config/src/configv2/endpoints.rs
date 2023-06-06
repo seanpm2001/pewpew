@@ -13,6 +13,7 @@ use std::{
     convert::TryFrom,
     str::FromStr,
 };
+use thiserror::Error;
 
 #[derive(Debug, Deserialize)]
 pub struct Endpoint<VD: Bool> {
@@ -40,6 +41,29 @@ pub struct Endpoint<VD: Bool> {
     #[serde(default)]
     no_auto_returns: bool,
     request_timeout: Option<Duration>,
+}
+
+impl PropagateVars for Endpoint<False> {
+    type Residual = Endpoint<True>;
+
+    fn insert_vars(self, vars: &super::VarValue<True>) -> Result<Self::Residual, super::VarsError> {
+        Ok(Endpoint {
+            declare: self.declare,
+            headers: self.headers.insert_vars(vars)?,
+            body: self.body.insert_vars(vars)?,
+            load_pattern: self.load_pattern.insert_vars(vars)?,
+            method: self.method,
+            peak_load: self.peak_load.insert_vars(vars)?,
+            tags: self.tags.insert_vars(vars)?,
+            url: self.url.insert_vars(vars)?,
+            provides: self.provides,
+            on_demand: self.on_demand,
+            logs: self.logs,
+            max_parallel_requests: self.max_parallel_requests,
+            no_auto_returns: self.no_auto_returns,
+            request_timeout: self.request_timeout,
+        })
+    }
 }
 
 /// Newtype wrapper around [`http::Method`] for implementing [`serde::Deserialize`].
@@ -102,14 +126,25 @@ impl PropagateVars for MultiPartBodySection<False> {
 #[serde(try_from = "&str")]
 struct HitsPerMinute(f64);
 
+#[derive(Debug, Error, PartialEq, Eq)]
+enum ParseHitsPerError {
+    #[error("invalid hits per minute")]
+    Invalid,
+    #[error("hits per minute value too large")]
+    TooBig,
+}
+
 impl FromStr for HitsPerMinute {
-    type Err = &'static str;
+    type Err = ParseHitsPerError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         use crate::shared::Per;
-        let (n, tag) = crate::shared::get_hits_per(s).ok_or("invalid")?;
+        let (n, tag) = crate::shared::get_hits_per(s).ok_or(ParseHitsPerError::Invalid)?;
         // Highly doubt anyone will do this, but you never know.
-        let n = n.is_finite().then_some(n).ok_or("hits per is too big")?;
+        let n = n
+            .is_finite()
+            .then_some(n)
+            .ok_or(ParseHitsPerError::TooBig)?;
         Ok(Self(
             n * match tag {
                 Per::Minute => 1.0,
@@ -162,9 +197,18 @@ mod tests {
 
         // Even though these are valid values for parsing a float, the regex won't catch them (and
         // shouldn't)
-        assert_eq!("NaN hpm".parse::<HitsPerMinute>(), Err("invalid"));
-        assert_eq!("infinity hpm".parse::<HitsPerMinute>(), Err("invalid"));
-        assert_eq!("-3.0 hpm".parse::<HitsPerMinute>(), Err("invalid"));
+        assert_eq!(
+            "NaN hpm".parse::<HitsPerMinute>(),
+            Err(super::ParseHitsPerError::Invalid)
+        );
+        assert_eq!(
+            "infinity hpm".parse::<HitsPerMinute>(),
+            Err(super::ParseHitsPerError::Invalid)
+        );
+        assert_eq!(
+            "-3.0 hpm".parse::<HitsPerMinute>(),
+            Err(super::ParseHitsPerError::Invalid)
+        );
     }
 
     #[test]

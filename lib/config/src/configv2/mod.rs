@@ -101,14 +101,19 @@ pub enum LoadTestGenError {
     YamlParse(#[from] serde_yaml::Error),
     #[error("{0}")]
     MissingEnvVar(#[from] MissingEnvVar),
+    #[error("error inserting static vars: {0}")]
+    VarsError(#[from] VarsError),
 }
 
 impl LoadTest<True, True> {
-    pub fn from_yaml(yaml: &str) -> Result<Self, LoadTestGenError> {
-        let pre_envs: LoadTest<False, False> = serde_yaml::from_str(yaml)?;
-        let env_vars = std::env::vars().collect::<BTreeMap<_, _>>();
-        let pre_vars = pre_envs.insert_env_vars(&env_vars)?;
-        todo!()
+    pub fn from_yaml(
+        yaml: &str,
+        env_vars: &BTreeMap<String, String>,
+    ) -> Result<Self, LoadTestGenError> {
+        let mut pre_vars =
+            serde_yaml::from_str::<LoadTest<False, False>>(yaml)?.insert_env_vars(&env_vars)?;
+        let vars = VarValue::Nested(std::mem::take(&mut pre_vars.vars));
+        Ok(pre_vars.insert_vars(&vars)?)
     }
 }
 
@@ -137,7 +142,7 @@ impl LoadTest<False, False> {
 }
 
 #[derive(Debug, Error)]
-enum VarsError {
+pub enum VarsError {
     #[error("var at path \"{0}\" not found")]
     VarNotFound(String),
     #[error("resulting string \"{from}\", was not a valid {typename} ({error})")]
@@ -149,6 +154,8 @@ enum VarsError {
     },
 }
 
+/// Trait for inserting static Vars into Templates. Any type in the config should implement this
+/// trait
 trait PropagateVars {
     // should be same generic type, but with VD as True
     type Residual;
@@ -163,13 +170,20 @@ impl PropagateVars for LoadTest<False, True> {
         let Self {
             config,
             load_pattern,
-            vars,
+            vars: v,
             providers,
             loggers,
             endpoints,
         } = self;
 
-        todo!()
+        Ok(LoadTest {
+            config: config.insert_vars(vars)?,
+            load_pattern: load_pattern.insert_vars(vars)?,
+            vars: v,
+            providers: providers.insert_vars(vars)?,
+            loggers: loggers.insert_vars(vars)?,
+            endpoints: endpoints.insert_vars(vars)?,
+        })
     }
 }
 
@@ -209,5 +223,16 @@ where
 
     fn insert_vars(self, vars: &VarValue<True>) -> Result<Self::Residual, VarsError> {
         self.into_iter().map(|x| x.insert_vars(vars)).collect()
+    }
+}
+
+impl<T> PropagateVars for Option<T>
+where
+    T: PropagateVars,
+{
+    type Residual = Option<T::Residual>;
+
+    fn insert_vars(self, vars: &VarValue<True>) -> Result<Self::Residual, VarsError> {
+        self.map(|t| t.insert_vars(vars)).transpose()
     }
 }
