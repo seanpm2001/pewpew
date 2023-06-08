@@ -52,7 +52,6 @@ impl EvalExpr {
                 })
                 .collect::<String>()
         );
-        needed.sort();
         let mut ctx = default_context();
         ctx.eval(script).unwrap();
         let efn: JsFunction =
