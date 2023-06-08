@@ -8,7 +8,7 @@ use boa_engine::{
 };
 use futures::{Stream, TryStreamExt};
 use itertools::Itertools;
-use std::{cell::RefCell, collections::BTreeMap};
+use std::collections::BTreeMap;
 use zip_all::zip_all;
 
 // TODO: Fill in Error type
