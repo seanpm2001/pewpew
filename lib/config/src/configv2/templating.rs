@@ -18,7 +18,7 @@ use itertools::Itertools;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::Deserialize;
-use std::{collections::BTreeMap, convert::TryFrom, str::FromStr};
+use std::{collections::BTreeMap, convert::TryFrom, iter::FromIterator, str::FromStr};
 use thiserror::Error;
 
 #[derive(Deserialize, PartialEq, Eq, Clone, Derivative)]
@@ -98,7 +98,7 @@ where
                 template,
                 __dontuse,
             } => {
-                let s = template.insert_vars(vars)?;
+                let s = template.insert_vars(vars)?.collapse();
                 if T::ProvAllowed::VALUE {
                     Ok(Template::NeedsProviders {
                         script: s,
@@ -139,6 +139,30 @@ impl<T: TemplateType> TemplatedString<T> {
             })
             .collect()
     }
+
+    fn collapse(self) -> Self {
+        self.into_iter()
+            .coalesce(|a, b| match (a, b) {
+                (TemplatePiece::Raw(x), TemplatePiece::Raw(y)) => Ok(TemplatePiece::Raw(x + &y)),
+                (x, y) => Err((x, y)),
+            })
+            .collect()
+    }
+}
+
+impl<T: TemplateType> IntoIterator for TemplatedString<T> {
+    type Item = TemplatePiece<T>;
+    type IntoIter = <Vec<TemplatePiece<T>> as IntoIterator>::IntoIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<T: TemplateType> FromIterator<TemplatePiece<T>> for TemplatedString<T> {
+    fn from_iter<I: IntoIterator<Item = TemplatePiece<T>>>(iter: I) -> Self {
+        Self(iter.into_iter().collect_vec())
+    }
 }
 
 impl<T: TemplateType> PropagateVars for TemplatedString<T>
@@ -166,8 +190,7 @@ where
                 }
                 other => Ok(other),
             })
-            .collect::<Result<Vec<_>, _>>()
-            .map(Self)
+            .collect()
     }
 }
 
@@ -186,8 +209,7 @@ where
                     .ok_or_else(|| MissingEnvVar(e)),
                 other => Ok(other),
             })
-            .collect::<Result<Vec<_>, _>>()
-            .map(Self)
+            .collect()
     }
 }
 
@@ -242,7 +264,7 @@ impl<T: TemplateType> TryFrom<&str> for TemplatedString<T> {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-enum TemplatePiece<T: TemplateType> {
+pub enum TemplatePiece<T: TemplateType> {
     Raw(String),
     Env(String, T::EnvsAllowed),
     Var(String, T::VarsAllowed),
