@@ -9,7 +9,7 @@ use boa_engine::{
 use futures::{Stream, TryStreamExt};
 use itertools::Itertools;
 use std::collections::BTreeMap;
-use zip_all::zip_all;
+use zip_all::zip_all_map;
 
 // TODO: Fill in Error type
 type ProviderStreamStream<Ar> =
@@ -69,29 +69,17 @@ impl EvalExpr {
         P: ProviderStream<Ar> + Sized + 'static,
         Ar: Clone + Send + Unpin + 'static,
     {
-        let providers = self
-            .needed
-            .iter()
-            .map(|pn| {
-                providers
-                    .get(pn)
-                    .map(ProviderStream::into_stream)
-                    .ok_or_else(|| format!("missing provider {pn}"))
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        let prov = zip_all(providers);
-        prov.map_ok(move |values| {
+        let providers = std::mem::take(&mut self.needed)
+            .into_iter()
+            .map(|pn| providers.get(&pn).map(|p| (pn, p.into_stream())).unwrap())
+            .collect::<BTreeMap<_, _>>();
+        zip_all_map(providers).map_ok(move |values| {
             let ctx = &mut self.ctx;
-            let values = self
-                .needed
-                .iter()
-                .zip(
-                    values
-                        .into_iter()
-                        .map(|(v, ar)| (JsValue::from_json(&v, ctx).unwrap(), ar)),
-                )
-                .collect::<BTreeMap<_, _>>();
+
+            let values: BTreeMap<_, _> = values
+                .into_iter()
+                .map(|(n, (v, ar))| (n, (JsValue::from_json(&v, ctx).unwrap(), ar)))
+                .collect();
             let mut object = ObjectInitializer::new(ctx);
             for (name, (value, _)) in values.iter() {
                 object.property(name.as_str(), value, Attribute::READONLY);
