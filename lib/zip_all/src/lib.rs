@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fmt,
     pin::Pin,
     task::{Context, Poll},
@@ -91,8 +92,86 @@ where
     ZipAll { elems }
 }
 
+#[derive(Debug)]
+#[must_use = "streams do nothing unless polled"]
+pub struct ZipAllMap<K, T>
+where
+    T: TryStream + Unpin,
+    T::Ok: Unpin,
+    T::Error: Unpin,
+    K: Ord + Clone,
+{
+    elems: BTreeMap<K, (T, Option<T::Ok>)>,
+}
+
+impl<K, T> Stream for ZipAllMap<K, T>
+where
+    T: TryStream + Unpin,
+    T::Ok: Unpin,
+    T::Error: Unpin,
+    K: Ord + Clone,
+{
+    type Item = Result<BTreeMap<K, T::Ok>, T::Error>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let mut all_done = true;
+        let this = Pin::into_inner(self);
+        for (s, result) in &mut this.elems.values_mut() {
+            match result {
+                None => match s.try_poll_next_unpin(cx) {
+                    Poll::Ready(Some(Ok(v))) => {
+                        *result = Some(v);
+                    }
+                    Poll::Ready(Some(Err(e))) => {
+                        this.elems.clear();
+                        return Poll::Ready(Some(Err(e)));
+                    }
+                    Poll::Ready(None) => {
+                        this.elems.clear();
+                        return Poll::Ready(None);
+                    }
+                    Poll::Pending => {
+                        all_done = false;
+                        continue;
+                    }
+                },
+                Some(_) => continue,
+            };
+        }
+
+        if all_done {
+            let result: BTreeMap<_, _> = this
+                .elems
+                .iter_mut()
+                .map(|(k, (_, o))| (k.clone(), o.take().unwrap()))
+                .collect();
+            if result.is_empty() {
+                Poll::Ready(None)
+            } else {
+                Poll::Ready(Some(Ok(result)))
+            }
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+pub fn zip_all_map<K, I, T>(elems: I) -> ZipAllMap<K, T>
+where
+    I: IntoIterator<Item = (K, T)>,
+    T: TryStream + Unpin,
+    T::Ok: Unpin,
+    T::Error: Unpin,
+    K: Ord + Clone,
+{
+    let elems = elems.into_iter().map(|(k, s)| (k, (s, None))).collect();
+    ZipAllMap { elems }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+
     use super::*;
     use futures::{executor::block_on_stream, stream, StreamExt};
 
@@ -133,6 +212,38 @@ mod tests {
 
         for r in block_on_stream(zip_all(streams)) {
             let expect = expects.remove(0);
+            assert_eq!(r, Ok(expect));
+        }
+
+        assert!(expects.is_empty());
+    }
+
+    #[test]
+    fn zip_all_map_works() {
+        use NumOrChar::{Char, Num};
+
+        // stream that yields: 1, 2, 3, 4
+        let a = stream::iter::<Vec<Result<NumOrChar, ()>>>((1..5).map(|v| Ok(Num(v))).collect())
+            .boxed();
+        // stream that yields: 6, 7, 8, 9
+        let b = stream::iter::<Vec<Result<NumOrChar, ()>>>((6..10).map(|v| Ok(Num(v))).collect())
+            .boxed();
+        // stream that yields: 'a', 'b', 'c', 'd'
+        let c = stream::iter::<Vec<Result<NumOrChar, ()>>>(
+            ['a', 'b', 'c', 'd'].iter().map(|v| Ok(Char(v))).collect(),
+        )
+        .boxed();
+        let streams: BTreeMap<&str, _> = [("a", a), ("b", b), ("c", c)].into();
+
+        let mut expects = VecDeque::from(vec![
+            BTreeMap::from([("a", Num(1)), ("b", Num(6)), ("c", Char(&'a'))]),
+            BTreeMap::from([("a", Num(2)), ("b", Num(7)), ("c", Char(&'b'))]),
+            BTreeMap::from([("a", Num(3)), ("b", Num(8)), ("c", Char(&'c'))]),
+            BTreeMap::from([("a", Num(4)), ("b", Num(9)), ("c", Char(&'d'))]),
+        ]);
+
+        for r in block_on_stream(zip_all_map(streams)) {
+            let expect = expects.pop_front().unwrap();
             assert_eq!(r, Ok(expect));
         }
 
