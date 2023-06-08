@@ -336,6 +336,7 @@ name = "config"
 version = "0.0.0"
 dependencies = [
  "base64 0.21.0",
+ "boa_engine",
  "derivative",
  "derive_more",
  "ether",
@@ -1504,7 +1505,6 @@ version = "0.5.12"
 dependencies = [
  "atty",
  "base64 0.21.0",
- "boa_engine",
  "body_reader",
  "bytes",
  "channel",

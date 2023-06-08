@@ -13,6 +13,7 @@ pub mod endpoints;
 pub mod load_pattern;
 pub mod loggers;
 pub mod providers;
+pub mod scripting;
 pub mod templating;
 
 pub mod common;
