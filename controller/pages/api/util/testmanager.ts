@@ -53,6 +53,7 @@ import { formatError, isYamlFile, latestPewPewVersion } from "./clientutil";
 import { createS3Filename as createS3MessageFilename } from "@fs/ppaas-common/dist/src/ppaass3message";
 import { createS3Filename as createS3StatusFilename } from "@fs/ppaas-common/dist/src/ppaasteststatus";
 import fs from "fs/promises";
+import semver from "semver";
 
 logger.config.LogFileName = "ppaas-controller";
 
@@ -66,6 +67,7 @@ const DEFAULT_MAX_SEARCH_RESULTS: number = parseInt(process.env.DEFAULT_MAX_SEAR
 const MAX_SEARCH_RESULTS: number = parseInt(process.env.MAX_SEARCH_RESULTS || "0", 10) || 10000;
 const ONE_MINUTE: number = 60000;
 const FIFTEEN_MINUTES: number = 15 * ONE_MINUTE;
+const LEGACY_PEWPEW_VERSION = "<0.6.0-preview";
 // Don't export so that the original can't be modified
 const RECURRING_FILE_TAGS_INTERNAL = new Map<string, string>([["recurring", "true"]]);
 /** Returns a new copy of the Map each time so the original can't be modified */
@@ -429,6 +431,16 @@ export async function downloadPriorTestId (
 }
 
 // Export for testing
+export function getValidateLegacyOnly (version: string | undefined): boolean | undefined {
+  // undefined or "latest" parse as anything (reutrn undefined)
+  if (!version || version === latestPewPewVersion) {
+    return undefined;
+  }
+  // This needs to create the validateLegacyOnly, so anything less than 0.6.0
+  return semver.satisfies(version, LEGACY_PEWPEW_VERSION, { includePrerelease: true });
+}
+
+// Export for testing
 export interface ValidateYamlfileResult {
   testRunTimeMn: number | undefined;
   bucketSizeMs: number | undefined;
@@ -440,7 +452,8 @@ export async function validateYamlfile (
   environmentVariables: EnvironmentVariables,
   additionalFileNames: string[],
   bypassParser: boolean | undefined,
-  authPermissions: AuthPermissions
+  authPermissions: AuthPermissions,
+  validateLegacyOnly?: boolean
 ): Promise<ErrorResponse | ValidateYamlfileResult> {
   let testRunTimeMn: number | undefined;
   let bucketSizeMs: number | undefined;
@@ -461,8 +474,9 @@ export async function validateYamlfile (
       for (const splunkPath of logger.PEWPEW_SPLUNK_INJECTED_VARIABLES) {
         dummyEnvironmentVariables[splunkPath] = dummySplunkPath;
       }
-      yamlParser = await YamlParser.parseYamlFile(yamlFile.filepath, dummyEnvironmentVariables);
-    } catch(error) {
+      // Pass pewpew version legacy/scripting
+      yamlParser = await YamlParser.parseYamlFile(yamlFile.filepath, dummyEnvironmentVariables, validateLegacyOnly);
+    } catch (error) {
       return { json: { message: `yamlFile: ${yamlFile.originalFilename || yamlFile.filepath} failed to parse`, error: formatError(error) }, status: 400 };
     }
 
@@ -1141,7 +1155,7 @@ export abstract class TestManager {
               }
             }
             log("parsed environmentVariables", LogLevel.DEBUG, Object.keys(environmentVariablesFile));
-          } catch(error) {
+          } catch (error) {
             log("Could not parse environmentVariables", LogLevel.TRACE, error, fields.environmentVariables);
             // Don't log the actual error or environmentVariables since it could include passwords
             return { json: { message: "Could not parse environmentVariables", error: formatError(error) }, status: 400 };
@@ -1202,7 +1216,9 @@ export abstract class TestManager {
         // Trace level since it might have passwords
         log("environmentVariables", LogLevel.TRACE, environmentVariablesFile);
 
-        const validateResult: ErrorResponse | ValidateYamlfileResult = await validateYamlfile(yamlFile, PpaasEncryptEnvironmentFile.getEnvironmentVariables(environmentVariablesFile), additionalFileNames, bypassParser, authPermissions);
+        // Pass pewpew version legacy/scripting
+        const validateLegacyOnly = getValidateLegacyOnly(version);
+        const validateResult: ErrorResponse | ValidateYamlfileResult = await validateYamlfile(yamlFile, PpaasEncryptEnvironmentFile.getEnvironmentVariables(environmentVariablesFile), additionalFileNames, bypassParser, authPermissions, validateLegacyOnly);
         // eslint-disable-next-line no-prototype-builtins
         if (validateResult.hasOwnProperty("json")) {
           return validateResult as ErrorResponse;
@@ -1541,7 +1557,7 @@ export abstract class TestManager {
           }
           try {
             await YamlParser.parseYamlFile(yamlFile.filepath, environmentVariables);
-          } catch(error) {
+          } catch (error) {
             return { json: { message: `yamlFile: ${yamlFile.originalFilename || yamlFile.filepath} failed to parse`, error: formatError(error) }, status: 400 };
           }
         }

@@ -1,27 +1,21 @@
 # Run this file with the test-server, then specify the PORT as a parameter to this try or run script.
 
 vars:
-  port: "${PORT}"
-
+  port: ${e:PORT}
 load_pattern:
-  - linear:
+  - !linear
       from: 100%
       to: 100%
       over: 5s
 
 providers:
-  a:
-    range: {}
-  b:
-    response: {}
-  c:
-    response: {}
-  d:
-    response: {}
-  e:
-    response: {}
-  f:
-    response: {}
+  a: !range
+  b: !response
+    buffer: 10
+  c: !response
+  d: !response
+  e: !response
+  f: !response
 
 loggers:
   test:
@@ -29,29 +23,39 @@ loggers:
 
 endpoints:
   - method: POST
-    url: http://localhost:${port}
-    body: '{"a": ${a}}'
+    url: http://localhost:${v:port}
+    body: !str '{"a": ${p:a}}'
     provides:
       b:
-        select: response.body.a
-    on_demand: true
+        query:
+          select: response.body.a
+        send: block
+    # on_demand: true
 
   - method: POST
     declare:
-      c: collect(b, 10) # Get 10
-    url: http://localhost:${port}
-    body: '{"c": ${c}}'
+      c: !c
+        collects:
+          - take: 10
+            from: ${p:b}
+            as: _c
+        then: ${p:_c}
+    url: http://localhost:${v:port}
+    body: !str '{"c": ${p:c}}'
+    # peak_load: 1hps
     provides:
       d:
-        # select: response.body.c
-        select: for_each[0]
-        for_each:
+        query:
+          # select: response.body.c
+          select: for_each[0]
+          for_each:
           - response.body.c
+        send: block
     on_demand: true
 
   - method: POST
-    url: http://localhost:${port}
-    body: '{"d": ${d}}'
+    url: http://localhost:${v:port}
+    body: !str '{"d": ${p:d}}'
     peak_load: 1hps
     logs:
       test:

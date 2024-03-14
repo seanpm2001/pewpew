@@ -1,7 +1,7 @@
-use config::{BodyTemplate, LoadTest, Provider};
+use config::LoadTestEither;
 use js_sys::Map;
-use log::{debug, LevelFilter};
-use std::{path::PathBuf, str::FromStr};
+use log::LevelFilter;
+use std::str::FromStr;
 use wasm_bindgen::{prelude::wasm_bindgen, throw_str, JsValue, UnwrapThrowExt};
 
 // Only valid because we are using this in a WebAssembly context without threads.
@@ -43,7 +43,7 @@ fn init_logging(log_level: Option<String>) {
 }
 
 #[wasm_bindgen]
-pub struct Config(LoadTest);
+pub struct Config(LoadTestEither);
 
 #[allow(clippy::unused_unit)]
 #[wasm_bindgen]
@@ -54,11 +54,16 @@ impl Config {
         bytes: &[u8],
         env_vars: Map,
         log_level: Option<String>,
+        validate_legacy_only: Option<bool>,
     ) -> Result<Config, JsValue> {
         init_logging(log_level);
         let env_vars = serde_wasm_bindgen::from_value(env_vars.into())?;
-        let load_test = LoadTest::from_config(bytes, &PathBuf::default(), &env_vars)
-            .map_err(|e| JsValue::from_str(&format!("{e:?}")))?;
+        let load_test = LoadTestEither::parse(
+            std::str::from_utf8(bytes).expect("TODO"),
+            &env_vars,
+            validate_legacy_only,
+        )
+        .map_err(|e| JsValue::from_str(&format!("{e:?}")))?;
         Ok(Config(load_test))
     }
 
@@ -72,9 +77,9 @@ impl Config {
     #[wasm_bindgen(js_name = getLoggerFiles)]
     pub fn get_logger_files(&self) -> Box<[JsValue]> {
         self.0
-            .loggers
-            .values()
-            .map(|l| l.to.as_str().into())
+            .get_logger_files()
+            .into_iter()
+            .map(|l| l.into())
             .collect::<Vec<_>>()
             .into_boxed_slice()
     }
@@ -82,50 +87,25 @@ impl Config {
     // return the bucket size for the test
     #[wasm_bindgen(js_name = getBucketSize)]
     pub fn get_bucket_size(&self) -> u64 {
-        self.0.config.general.bucket_size.as_secs()
+        self.0.get_bucket_size()
     }
 
     // return a string array of files used to feed providers
     #[wasm_bindgen(js_name = getInputFiles)]
     pub fn get_input_files(&self) -> Box<[JsValue]> {
-        // We also need to include file bodies so we can validate that we have those as well.
-        // Endpoint file bodies - BodyTemplate(File)
-        let mut body_files: Vec<JsValue> = self
-            .0
-            .endpoints
-            .iter()
-            .filter_map(|endpoint| {
-                if let BodyTemplate::File(_, template) = &endpoint.body {
-                    // The path is the base path, the template.pieces has the real path
-                    debug!("endpoint::body::file.template={:?}", template);
-                    Some(template.evaluate_with_star().into())
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-        // file providers
-        let mut provider_files = self
-            .0
-            .providers
-            .iter()
-            .filter_map(|(_, v)| {
-                if let Provider::File(f) = v {
-                    Some(f.path.as_str().into())
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-        provider_files.append(&mut body_files);
-        provider_files.into_boxed_slice()
+        self.0
+            .get_input_files()
+            .into_iter()
+            .map(|l| l.into())
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
     }
 
     // returns nothing if the config file has no errors, throws an error containing a string description, if the config file has errors
     #[wasm_bindgen(js_name = checkOk)]
     pub fn check_ok(&self) -> Result<(), JsValue> {
         self.0
-            .ok_for_loadtest()
+            .check_ok()
             .map_err(|e| JsValue::from_str(&format!("{e:?}")))
     }
 }

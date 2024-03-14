@@ -1,127 +1,135 @@
 # Run this file with the test-server, then specify the PORT as a parameter to this try or run script.
 
 vars:
-  port: "${PORT}"
+  port: "${e:PORT}"
   groupRate: 1
   imagesPerGroup: 10
 
 load_pattern:
-  - linear:
+  - !linear
       from: 100%
       to: 100%
       over: 5s
 
 providers:
   a: # Counter for creating groups
-    range: {}
+    !range
   x: # counter for creating images to put in groups
-    range: {}
+    !range
   b: # to continue the group APIs
-    response: {}
+    !response
   b2: # to create images
-    response: {}
+    !response
   y: # to continue the image APIs
-    response: {}
-  c:
-    response: {}
-  z:
-    response: {}
+    !response
+  c: !response
+  z: !response
 
 loggers:
   test:
-    to: stderr
+    to: !stderr
 
 endpoints:
   - method: POST
-    url: http://localhost:${port}
+    url: http://localhost:${v:port}
     tags:
       type: create group
-    body: '{
-        "a":"${start_pad(a, 6, "0")}"
+    body: !str '{
+        "a":"${x:start_pad(${p:a}, 6, "0")}"
       }'
     provides:
       b:
-        select: response.body.a
-        where: response.status == 200 || response.status == 409
+        query:
+          select: response.body.a
+          where: response.status == 200 || response.status == 409
+        send: if_not_full
       b2:
-        select: response.body.a
-        for_each:
-          - repeat(imagesPerGroup) # We need to create X copies so each image will have one
-        where: response.status == 200 || response.status == 409
-    peak_load: ${groupRate}hps
+        query:
+          select: response.body.a
+          for_each:
+            - repeat(_v.imagesPerGroup) # We need to create X copies so each image will have one
+          where: response.status == 200 || response.status == 409
+        send: if_not_full
+    peak_load: ${v:groupRate}hps
 
   - method: POST
-    url: http://localhost:${port}
+    url: http://localhost:${v:port}
     tags:
       type: create image
-    body: '{
-        "x":"${start_pad(x, 8, "0")}",
-        "b":"${b2}"
+    body: !str '{
+        "x":"${x:start_pad(${p:x}, 8, "0")}",
+        "b":"${p:b2}"
       }'
     provides:
       y:
-        select:
-          x: response.body.x
-          b: response.body.b
-        where: response.status == 200 || response.status == 409
-    peak_load: ${groupRate * imagesPerGroup}hps # Needs to be a higher rate to keep up with groups
+        query:
+          select:
+            x: response.body.x
+            b: response.body.b
+          where: response.status == 200 || response.status == 409
+        send: if_not_full
+    peak_load: ${x:${v:groupRate} * ${v:imagesPerGroup}}hps # Needs to be a higher rate to keep up with groups
 
   - method: POST
-    url: http://localhost:${port}
+    url: http://localhost:${v:port}
     tags:
       type: create group data
-    body: '{
-        "b":"${b}",
+    body: !str '{
+        "b":"${p:b}",
         "data":{
           "subdata":"A-DATA"
         }
       }'
     provides:
       c:
-        select: response.body.b
-        where: response.status == 200
-    peak_load: ${groupRate}hps
+        query:
+          select: response.body.b
+          where: response.status == 200
+        send: if_not_full
+    peak_load: ${v:groupRate}hps
 
   - method: POST
-    url: http://localhost:${port}
+    url: http://localhost:${v:port}
     tags:
       type: create image
-    body: '{
-        "x":"${y.x}",
-        "b":"${y.b}",
+    body: !str '{
+        "x":"${x:${p:y}.x}",
+        "b":"${x:${p:y}.b}",
         "data":{
           "subdata":"X-DATA"
         }
       }'
     provides:
       z:
-        select: y # Puts in the whole object (id and groupId)
-        where: response.status == 200
-    peak_load: ${groupRate * imagesPerGroup}hps # Needs to be a higher rate to keep up with groups
+        query:
+          select: y # Puts in the whole object (id and groupId)
+          where: response.status == 200
+        send: if_not_full
+    peak_load: ${x:${v:groupRate} * ${v:imagesPerGroup}}hps # Needs to be a higher rate to keep up with groups
 
   - method: PUT
-    url: http://localhost:${port}
-    body: '{
-        "c":"${c}",
+    url: http://localhost:${v:port}
+    body: !str '{
+        "c":"${p:c}",
         "data":{
           "subdata":"UPDATED-A-DATA"
         }
       }'
-    peak_load: ${groupRate}hps
+    peak_load: ${v:groupRate}hps
     logs:
       test:
         select: response.body.c
 
   - method: PUT
-    url: http://localhost:${port}
-    body: '{
-        "x":"${z.x}",
-        "b":"${z.b}",
+    url: http://localhost:${v:port}
+    body: !str '{
+        "x":"${x:${p:z}.x}",
+        "b":"${x:${p:z}.b}",
         "data":{
           "subdata":"UPDATED-X-DATA"
         }
       }'
-    peak_load: ${groupRate * imagesPerGroup}hps # Needs to be a higher rate to keep up with groups
+    peak_load: ${x:${v:groupRate} * ${v:imagesPerGroup}}hps # Needs to be a higher rate to keep up with groups
     logs:
       test:
         select: response.body.x

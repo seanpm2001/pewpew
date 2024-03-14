@@ -1,0 +1,127 @@
+# Run this file with the test-server, then specify the PORT as a parameter to this try or run script.
+
+vars:
+  port: "${PORT}"
+  groupRate: 1
+  imagesPerGroup: 10
+
+load_pattern:
+  - linear:
+      from: 100%
+      to: 100%
+      over: 5s
+
+providers:
+  a: # Counter for creating groups
+    range: {}
+  x: # counter for creating images to put in groups
+    range: {}
+  b: # to continue the group APIs
+    response: {}
+  b2: # to create images
+    response: {}
+  y: # to continue the image APIs
+    response: {}
+  c:
+    response: {}
+  z:
+    response: {}
+
+loggers:
+  test:
+    to: stderr
+
+endpoints:
+  - method: POST
+    url: http://localhost:${port}
+    tags:
+      type: create group
+    body: '{
+        "a":"${start_pad(a, 6, "0")}"
+      }'
+    provides:
+      b:
+        select: response.body.a
+        where: response.status == 200 || response.status == 409
+      b2:
+        select: response.body.a
+        for_each:
+          - repeat(imagesPerGroup) # We need to create X copies so each image will have one
+        where: response.status == 200 || response.status == 409
+    peak_load: ${groupRate}hps
+
+  - method: POST
+    url: http://localhost:${port}
+    tags:
+      type: create image
+    body: '{
+        "x":"${start_pad(x, 8, "0")}",
+        "b":"${b2}"
+      }'
+    provides:
+      y:
+        select:
+          x: response.body.x
+          b: response.body.b
+        where: response.status == 200 || response.status == 409
+    peak_load: ${groupRate * imagesPerGroup}hps # Needs to be a higher rate to keep up with groups
+
+  - method: POST
+    url: http://localhost:${port}
+    tags:
+      type: create group data
+    body: '{
+        "b":"${b}",
+        "data":{
+          "subdata":"A-DATA"
+        }
+      }'
+    provides:
+      c:
+        select: response.body.b
+        where: response.status == 200
+    peak_load: ${groupRate}hps
+
+  - method: POST
+    url: http://localhost:${port}
+    tags:
+      type: create image
+    body: '{
+        "x":"${y.x}",
+        "b":"${y.b}",
+        "data":{
+          "subdata":"X-DATA"
+        }
+      }'
+    provides:
+      z:
+        select: y # Puts in the whole object (id and groupId)
+        where: response.status == 200
+    peak_load: ${groupRate * imagesPerGroup}hps # Needs to be a higher rate to keep up with groups
+
+  - method: PUT
+    url: http://localhost:${port}
+    body: '{
+        "c":"${c}",
+        "data":{
+          "subdata":"UPDATED-A-DATA"
+        }
+      }'
+    peak_load: ${groupRate}hps
+    logs:
+      test:
+        select: response.body.c
+
+  - method: PUT
+    url: http://localhost:${port}
+    body: '{
+        "x":"${z.x}",
+        "b":"${z.b}",
+        "data":{
+          "subdata":"UPDATED-X-DATA"
+        }
+      }'
+    peak_load: ${groupRate * imagesPerGroup}hps # Needs to be a higher rate to keep up with groups
+    logs:
+      test:
+        select: response.body.x

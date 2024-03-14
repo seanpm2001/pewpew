@@ -1,0 +1,85 @@
+WHITESPACE = _{ " " | "\n" | "\t" | "\r\n" }
+
+value = ${ boolean | null | json_path | string_outer | number }
+
+json_ident = @{ json_ident_start ~ json_ident_rest* }
+
+json_ident_start = { "$" | "_" | LETTER | LETTER_NUMBER }
+
+json_ident_rest = {
+    json_ident_start |
+    "\u{200C}" |
+    "\u{200D}" |
+    NONSPACING_MARK |
+    SPACING_MARK |
+    DECIMAL_NUMBER |
+    CONNECTOR_PUNCTUATION
+}
+
+json_path = ${
+    (function_call | json_ident) ~
+    (indexed_property | "." ~ json_ident)*
+}
+
+indexed_property = !{ "[" ~ (string_outer | integer) ~ "]" }
+
+function_ident = @{ (ASCII_ALPHANUMERIC | "_")+ }
+
+function_call = !{
+	function_ident ~
+	"(" ~
+    (function_arg ~ ("," ~ function_arg)*)? ~
+    ")"
+}
+
+function_arg = { expression }
+
+QUOTATION_MARK = _{ "\"" | "'" | "`" }
+
+not_quote = _{ !PEEK ~ ANY }
+
+string = @{ (("\\" ~ ANY) | not_quote)* }
+
+string_outer = _{ PUSH(QUOTATION_MARK) ~ string ~ POP }
+
+integer = @{ "-"? ~ ASCII_DIGIT+ }
+
+decimal = @{ "-"? ~ ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT+}
+
+number = _{ decimal | integer }
+
+boolean = { "true" | "false" }
+
+null = { "null" }
+
+entry_point = _{ SOI ~ expression ~ EOI }
+
+template_not_expression = ${ (!"${" ~ (("\\" ~ ANY) | ANY))+ }
+
+template_expression = !{ "${" ~ expression ~ "}" }
+
+template_entry_point = @{ SOI ~ ( template_expression | template_not_expression )* ~ EOI }
+
+expression = {
+	unary_operator* ~ (value | group_expression)
+    ~ (infix_operator ~ expression)*
+}
+
+group_expression = _{ "(" ~ expression ~ ")" }
+
+unary_operator = _{ "!" }
+infix_operator = {
+    "||"
+    | "&&"
+    | "=="
+    | "!="
+    | ">="
+    | ">"
+    | "<="
+    | "<"
+    | "+"
+    | "-"
+    |  "*"
+    | "/"
+    | "%"
+}

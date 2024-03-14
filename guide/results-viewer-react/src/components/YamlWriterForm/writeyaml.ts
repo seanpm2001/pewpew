@@ -5,8 +5,10 @@ import {
   PewPewProvider,
   PewPewVars
 } from "../../util/yamlwriter";
+import { load_test_yaml_from_js as loadTestYamlFromJs } from "@fs/config-gen";
+import { log } from "../../util/log";
 import { saveAs } from "file-saver";
-import yaml from "js-yaml";
+
 
 export interface PewPewYamlFile {
   vars?: Record<string, string>;
@@ -32,7 +34,7 @@ export const createYamlJson = ({ urls, patterns, vars, providers, loggers }: Omi
   const myYaml: PewPewYamlFile = {};
 
   // Vars that have been selected
-  if (vars.length > 0)  {
+  if (vars.length > 0) {
     myYaml.vars = {};
 
     for (const pewpewVar of vars) {
@@ -53,7 +55,7 @@ export const createYamlJson = ({ urls, patterns, vars, providers, loggers }: Omi
     myYaml.load_pattern = [];
     for (const pattern of patterns) {
       if (myYaml.load_pattern) {
-        myYaml.load_pattern.push((pattern.from ? ({linear: {from: `${pattern.from}%`, to: `${pattern.to}%`, over: `${pattern.over}`}}) : ({linear: {to: `${pattern.to}%`, over: `${pattern.over}`}})));
+        myYaml.load_pattern.push((pattern.from ? ({ linear: { from: `${pattern.from}%`, to: `${pattern.to}%`, over: `${pattern.over}` } }) : ({ linear: { to: `${pattern.to}%`, over: `${pattern.over}` } })));
       }
     }
   }
@@ -64,11 +66,12 @@ export const createYamlJson = ({ urls, patterns, vars, providers, loggers }: Omi
     for (const logger of loggers) {
       const loggerName = logger.name.toString();
       myYaml.loggers[loggerName] = {};
-      myYaml.loggers[loggerName].select = {};
+      myYaml.loggers[loggerName].query = {};
+      myYaml.loggers[loggerName].query.select = {};
       for (const select of logger.select) {
-        myYaml.loggers[loggerName].select[select.name] = select.value;
+        myYaml.loggers[loggerName].query.select[select.name] = select.value;
       }
-      if (logger.where) { myYaml.loggers[loggerName].where = logger.where; }
+      if (logger.where) { myYaml.loggers[loggerName].query.where = logger.where; }
       if (logger.to) { myYaml.loggers[loggerName].to = logger.to; }
       if (logger.limit) { myYaml.loggers[loggerName].limit = logger.limit; }
       if (logger.pretty) { myYaml.loggers[loggerName].pretty = logger.pretty; }
@@ -87,7 +90,7 @@ export const createYamlJson = ({ urls, patterns, vars, providers, loggers }: Omi
         };
       }
       else if (provider.type === "response") {
-        myYaml.providers[providerName] = {response: provider.response ? provider.response : {}};
+        myYaml.providers[providerName] = { response: provider.response ? provider.response : {} };
       }
       else if (provider.type === "range") {
         myYaml.providers[providerName] = {
@@ -114,7 +117,7 @@ export const createYamlJson = ({ urls, patterns, vars, providers, loggers }: Omi
     myYaml.endpoints = [];
     for (const url of urls) {
       if (myYaml.endpoints) {
-        myYaml.endpoints.push({method: url.method, url: url.url});
+        myYaml.endpoints.push({ method: url.method, url: url.url });
         if (url.headers.length > 0) {
           myYaml.endpoints[myYaml.endpoints.length - 1].headers = {};
         }
@@ -136,14 +139,10 @@ export const createYamlJson = ({ urls, patterns, vars, providers, loggers }: Omi
 
 export function createYamlString ({ urls, patterns, vars, providers, loggers }: Omit<WriteFileParam, "filename">): string {
   const myYaml: PewPewYamlFile = createYamlJson({ urls, patterns, vars, providers, loggers });
-  // This line parses everything into a Yaml format
-  const yamlString = yaml.dump(JSON.parse(JSON.stringify(myYaml)));
+  const myYamlString = JSON.stringify(myYaml);
 
-  // Here we put everything into an array and then filter out all single quotation marks ' from array
-  // (This is necessary in order to solve a problem in the yaml.safeDump function that add quotes around things like ${PEAK_LOAD})
-  const yamlArray = Array.from(yamlString).filter((item) => item !== "'");
-
-  return yamlArray.join("");
+  log(myYamlString);
+  return loadTestYamlFromJs(myYamlString);
 }
 
 // Writes endpoints to one object, and then uses js-yaml to write as a yaml
@@ -156,7 +155,7 @@ export function writeFile ({ urls, patterns, vars, providers, loggers, filename 
   // Here we change everything back from an array into a string
   yamlParsed += myYaml;
   // Here we save that string as a Blob called file
-  const file = new Blob([yamlParsed], { type: "text/yaml"});
+  const file = new Blob([yamlParsed], { type: "text/yaml" });
 
   saveAs(file, filename + ".yaml");
 }

@@ -1,0 +1,24 @@
+[package]
+name = "config-gen"
+version.workspace = true
+edition = "2021"
+publish = false
+license.workspace = true
+
+[lib]
+crate_type = ["cdylib", "rlib"]
+
+[dependencies]
+config.workspace = true
+console_error_panic_hook = "0.1.7"
+js-sys.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+wasm-bindgen.workspace = true
+getrandom.workspace = true
+log.workspace = true
+wasm-logger.workspace = true
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3.37"
